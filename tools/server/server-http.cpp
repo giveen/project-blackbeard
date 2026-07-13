@@ -278,8 +278,12 @@ bool server_http_context::init(const common_params & params) {
     // register server middlewares
     srv->set_pre_routing_handler([&params, middleware_validate_api_key, middleware_server_state](const httplib::Request & req, httplib::Response & res) {
         if (params.cors_credentials && params.cors_origins == "*") {
-            // special case: echo back the Origin header to allow any origin to access the server with credentials
-            res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+            // SECURITY: do not reflect arbitrary Origin with credentials.
+            // Only reflect loopback origins. Non-loopback origins get no CORS header.
+            std::string origin = req.get_header_value("Origin");
+            if (origin_is_localhost(origin)) {
+                res.set_header("Access-Control-Allow-Origin", origin);
+            }
         } else if (params.cors_origins == "localhost") {
             // special case: only reflect the Origin header if it is a localhost origin
             std::string origin = req.get_header_value("Origin");
@@ -298,6 +302,20 @@ bool server_http_context::init(const common_params & params) {
             res.set_header("Access-Control-Allow-Headers",     params.cors_headers);
             res.set_content("", "text/html"); // blank response, no data
             return httplib::Server::HandlerResponse::Handled; // skip further processing
+        }
+        if (!origin_ok) {
+            res.status = 403;
+            res.set_content(
+                safe_json_to_str(json {
+                    {"error", {
+                        {"message", "Origin not allowed"},
+                        {"type", "cors_error"},
+                        {"code", 403}
+                    }}
+                }),
+                "application/json; charset=utf-8"
+            );
+            return httplib::Server::HandlerResponse::Handled;
         }
         if (!middleware_server_state(req, res)) {
             return httplib::Server::HandlerResponse::Handled;
