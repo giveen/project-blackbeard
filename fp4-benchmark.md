@@ -165,20 +165,24 @@ FA on:
 
 ---
 
+
 ## NVFP4 Decode Cache (`--nvfp4-decode-cache`)
 
 Converts Q8_0 weights to NVFP4 at load time for faster TG decode (RTX 5090,
-build `ab3b20e92` (10075), Qwen3VL-8B Q8_0, 128 tokens):
+build `ab3b20e92` (10075), 128 tokens):
 
-| Test | Baseline (Q8_0) | +NVFP4 decode cache | Delta |
-| ---- | ---------------:| -------------------:| -----:|
-| pp128 | 6133.95 t/s | 5994.94 t/s | -2.3% |
-| tg128 | **166.57 t/s** | **267.42 t/s** | **+60.5%** |
-| Load time | ~2s | **~82s** | **41x slower** |
+| Model | Test | Baseline (Q8_0) | +NVFP4 decode cache | Delta |
+| ----- | ---- | ---------------:| -------------------:| -----:|
+| Qwen3VL-8B Q8_0 | pp128 | 6133.95 t/s | 5994.94 t/s | -2.3% |
+| Qwen3VL-8B Q8_0 | tg128 | **166.57 t/s** | **267.42 t/s** | **+60.5%** |
+| Qwen3VL-8B Q8_0 | Load | ~2s | ~82s | 41x slower |
+| Gemma 4 12B Q8_0 | pp128 | 4048.96 t/s | 3768.68 t/s | -6.9% |
+| Gemma 4 12B Q8_0 | tg128 | **97.14 t/s** | **140.45 t/s** | **+44.6%** |
+| Gemma 4 12B Q8_0 | Load | ~2s | ~120s | 60x slower |
 
-**Caveat:** Model load time jumps from ~2s to ~82s for an 8B model because
-`build_nvfp4_decode_cache` processes all 254 Q8_0 tensors sequentially on
-CPU: GPU download -> CPU dequant to f32 -> CPU requant to NVFP4 -> GPU upload.
+**Caveat:** Model load time jumps from ~2s to ~80-120s depending on model size.
+`build_nvfp4_decode_cache` processes all Q8_0 tensors sequentially on CPU:
+GPU download -> CPU dequant to f32 -> CPU requant to NVFP4 -> GPU upload.
 No progress output without `--verbose`. The TG speedup makes it worthwhile
 for persistent serving (one-time load cost), but unsuitable for short-lived
 processes.
@@ -188,4 +192,6 @@ processes.
 | ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
 | qwen3vl 8B Q8_0                |   8.11 GiB |     8.19 B | CUDA       |  99 |           pp128 |       5994.94 ± 0.00 |
 | qwen3vl 8B Q8_0                |   8.11 GiB |     8.19 B | CUDA       |  99 |           tg128 |        267.42 ± 0.00 |
+| gemma4 ?B Q8_0                 |  12.69 GiB |    11.91 B | CUDA       |  99 |           pp128 |       3768.68 ± 0.00 |
+| gemma4 ?B Q8_0                 |  12.69 GiB |    11.91 B | CUDA       |  99 |           tg128 |        140.45 ± 0.00 |
 ```
