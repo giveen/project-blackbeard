@@ -4,3 +4,4 @@ bench_*.csv
 *.log
 *.o
 *.d
+wikitext-2-raw/
