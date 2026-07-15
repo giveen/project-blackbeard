@@ -625,6 +625,7 @@ static void dequantize_row_mxfp4_cuda(const void * vx, dst_t * y, const int64_t 
     dequantize_block_mxfp4<<<nb, 32, 0, stream>>>(vx, y);
 }
 
+
 template <typename dst_t>
 static __global__ void dequantize_block_nvfp4(
         const void * __restrict__ vx,
@@ -650,8 +651,20 @@ static __global__ void dequantize_block_nvfp4(
     const int64_t y0 = base + sub * QK_NVFP4_SUB + j;
     const int64_t y1 = y0 + QK_NVFP4_SUB / 2;
 
+#if __CUDA_ARCH__ >= 1200
+    // Hardware FP4 decode via PTX cvt.rn.f16x2.e2m1x2 (single instruction).
+    uint32_t fp16x2;
+    asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+        : "=r"(fp16x2) : "r"((uint32_t)q));
+    const half2 h = *reinterpret_cast<const half2 *>(&fp16x2);
+    const float2 v = __half22float2(h);
+    // cvt gives actual E2M1 values; double them to match the table convention
+    yy[y0] = ggml_cuda_cast<dst_t>(d * 2.0f * v.x);
+    yy[y1] = ggml_cuda_cast<dst_t>(d * 2.0f * v.y);
+#else
     yy[y0] = ggml_cuda_cast<dst_t>(d * kvalues_mxfp4[q & 0x0F]);
     yy[y1] = ggml_cuda_cast<dst_t>(d * kvalues_mxfp4[q >> 4]);
+#endif
 }
 
 template <typename dst_t>

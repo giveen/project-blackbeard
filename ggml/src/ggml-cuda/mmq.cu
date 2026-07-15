@@ -192,7 +192,7 @@ void ggml_cuda_mul_mat_q(
             ne02, ne12, s02, s12, s2,
             ne03, ne13, s03, s13, s3,
             ne1};
-        ggml_cuda_mul_mat_q_switch_type(ctx, args, stream, force_w4a8);
+        ggml_cuda_mul_mat_q_switch_type(ctx, args, stream, false);
         return;
     }
 
@@ -265,7 +265,7 @@ void ggml_cuda_mul_mat_q(
         ne03, ne13, s03, s13, s3,
         ne12};
 
-    ggml_cuda_mul_mat_q_switch_type(ctx, args, stream, force_w4a8);
+    ggml_cuda_mul_mat_q_switch_type(ctx, args, stream, false);
 }
 
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts) {
