@@ -1859,14 +1859,20 @@ ggml_tensor * llama_kv_cache::build_rope_shift(
         tmp = ggml_cast(ctx, cur, GGML_TYPE_F32);
 
         // rotate back
-        tmp = llama_mul_mat_hadamard(ctx, tmp, rot);
+        // rot is only built when the cache uses the K rotation scheme (attn_rot_k);
+        // a standard quantized K cache reaches this branch with rot == nullptr
+        if (rot) {
+            tmp = llama_mul_mat_hadamard(ctx, tmp, rot);
+        }
 
         tmp = ggml_rope_ext(ctx, tmp,
                 shift, factors, n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                 yarn_ext_factor, yarn_attn_factor, yarn_beta_fast, yarn_beta_slow);
 
         // rotate fwd
-        tmp = llama_mul_mat_hadamard(ctx, tmp, rot);
+        if (rot) {
+            tmp = llama_mul_mat_hadamard(ctx, tmp, rot);
+        }
 
         tmp = ggml_cpy(ctx, tmp, cur);
     } else {
@@ -1954,7 +1960,7 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
     return gf;
 }
 
-void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags, llama_pos p0, llama_pos p1) const {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;
@@ -1986,6 +1992,12 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
                 const bool is_masked = llama_hparams::is_masked_swa(n_swa, swa_type, cells.pos_get(i), cells.seq_pos_max(seq_id));
 
                 add_cell = !is_masked;
+            }
+
+            if (add_cell) {
+                const llama_pos pos = cells.pos_get(i);
+                add_cell = add_cell && (p0 < 0 || pos >= p0);
+                add_cell = add_cell && (p1 < 0 || pos < p1);
             }
 
             if (add_cell) {
@@ -2024,7 +2036,7 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
     }
 }
 
-void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags, llama_pos p0, llama_pos p1) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;
@@ -2053,7 +2065,7 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
         slot_info sinfo;
 
         bool res = true;
-        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id);
+        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id, p0, p1);
         res = res && state_read_data(io, strm, cell_count, sinfo);
 
         if (!res) {
@@ -2199,13 +2211,12 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
     }
 }
 
-bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id) {
+bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id, llama_pos p0, llama_pos p1) {
     auto & cells = v_cells[strm];
     auto & head  = v_heads[strm];
 
     if (dest_seq_id != -1) {
-        // single sequence
-        seq_rm(dest_seq_id, -1, -1);
+        seq_rm(dest_seq_id, p0, p1);
 
         llama_batch_allocr balloc(hparams.n_pos_per_embd());
 

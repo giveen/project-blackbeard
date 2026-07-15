@@ -230,11 +230,16 @@ static const char * cu_get_error_str(CUresult err) {
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 #    define CUDA_SET_SHARED_MEMORY_LIMIT(kernel, nbytes)                                                       \
         do {                                                                                                   \
-            static bool shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = { false };                         \
-            const int   id                                                = ggml_cuda_get_device();            \
-            if (!shared_memory_limit_raised[id]) {                                                             \
+            static const void * raised_kernels[GGML_CUDA_MAX_DEVICES][64];                                     \
+            static int          raised_count[GGML_CUDA_MAX_DEVICES] = { 0 };                                   \
+            const int           id   = ggml_cuda_get_device();                                                 \
+            bool                found = false;                                                                 \
+            for (int i = 0; i < raised_count[id] && !found; i++) {                                            \
+                if (raised_kernels[id][i] == (const void *)(kernel)) found = true;                             \
+            }                                                                                                  \
+            if (!found) {                                                                                      \
                 CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes)); \
-                shared_memory_limit_raised[id] = true;                                                         \
+                if (raised_count[id] < 64) raised_kernels[id][raised_count[id]++] = (const void *)(kernel);    \
             }                                                                                                  \
         } while (0)
 #else
@@ -963,6 +968,13 @@ struct ggml_cuda_type_traits<GGML_TYPE_Q1_0> {
     static constexpr int qk = QK1_0;
     static constexpr int qr = QR1_0;
     static constexpr int qi = QI1_0;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q2_0> {
+    static constexpr int qk = QK2_0;
+    static constexpr int qr = QR2_0;
+    static constexpr int qi = QI2_0;
 };
 
 template<>

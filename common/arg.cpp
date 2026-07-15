@@ -2451,6 +2451,27 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_DEVICE"));
     add_opt(common_arg(
+        {"--prefill-device"}, "<dev1,dev2;dev3,dev4;..>",
+        "semicolon-separated device groups for disaggregated prefill contexts\n"
+        "use --list-devices to see a list of available devices",
+        [](common_params & params, const std::string & value) {
+            params.devices_prefill.clear();
+            for (const auto & group : string_split<std::string>(value, ';')) {
+                params.devices_prefill.push_back(parse_device_list(group));
+            }
+        }
+    ).set_env("LLAMA_ARG_PREFILL_DEVICE").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--prefill-min-tokens"}, "N",
+        "minimum uncached prefix length for disaggregated prefill (default: 0)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("prefill-min-tokens must be non-negative");
+            }
+            params.n_prefill_min = value;
+        }
+    ).set_env("LLAMA_ARG_PREFILL_MIN_TOKENS").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--list-devices"},
         "print list of available devices and exit",
         [](common_params &) {
@@ -2933,7 +2954,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_TOKENIZE}));
     add_opt(common_arg(
         {"--stdin"},
-        string_format("read the prompt from stdin (mutually exclusive with -f/--file and -p/--prompt) (default: %s)", params.tokenize_stdin ? "true" : "false"),
+        string_format("read the prompt from stdin (takes precedence over -f/--file and -p/--prompt) (default: %s)", params.tokenize_stdin ? "true" : "false"),
         [](common_params & params) {
             params.tokenize_stdin = true;
         }
@@ -3823,6 +3844,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.p_min = std::stof(value);
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_MIN"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive-length-threshold"}, "N",
+        string_format("minimum consecutive successes/failues before increasing/decreasing the size of the generated draft by one up to draft-n-max/min. note: draft-n-min must be at least 1 (default: %d, 0 = disabled)", (int)params.speculative.draft.adaptive_length_threshold),
+        [](common_params & params, int value) {
+            params.speculative.draft.adaptive_length_threshold = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_THRESHOLD"));
+    add_opt(common_arg(
+        {"--spec-draft-adaptive-length-bias"}, "N",
+        string_format("in adaptive draft length a success is defined as the target model accepting the full draft minus N tokens (default: %d)", (int)params.speculative.draft.adaptive_length_threshold),
+        [](common_params & params, int value) {
+            params.speculative.draft.adaptive_length_bias = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_ADAPTIVE_LENGTH_BIAS"));
     add_opt(common_arg(
         {"--spec-draft-backend-sampling"},
         {"--no-spec-draft-backend-sampling"},
