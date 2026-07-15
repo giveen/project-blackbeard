@@ -105,6 +105,23 @@ Note: nvidia-smi sampling at 0.5s intervals under-samples the actual compute bur
 
 ---
 
+## NVFP4 KV Cache
+
+Added CUDA `quantize_f32_nvfp4_block` kernel and SET_ROWS support so the KV
+cache can store K/V in NVFP4 format (4.5 bits/element) instead of f16
+(16 bits/element). The MMA flash attention path dequantizes to f16 on the fly
+during inference.
+
+| Cache type | pp512 (t/s) | tg256 (t/s) | Storage per element |
+|---|---|---|---|
+| f16 | 8,797 | 205 | 16 bits |
+| NVFP4 | 8,720 | 196 | 4.5 bits |
+| Delta | -0.9% | -4.4% | **3.6x less memory** |
+
+The performance impact is minimal. The memory savings let you store a longer
+context in the same VRAM, or reduce pressure for batched inference.
+
+
 ## Raw `llama-bench` Output
 
 ### 35B MoE NVFP4 — batch-size sweep
