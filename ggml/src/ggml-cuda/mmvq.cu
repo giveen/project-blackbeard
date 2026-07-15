@@ -1287,6 +1287,7 @@ void ggml_cuda_mul_mat_vec_q(
         ne01,              ncols_dst,     vx_s01, stride_col_y,     stride_col_dst,
         ne02, nchannels_y, nchannels_dst, vx_s02, stride_channel_y, stride_channel_dst,
         ne03,              ne3,           vx_s03, s13,              s3,               ids_stride, stream);
+
 }
 
 void ggml_cuda_op_mul_mat_vec_q(

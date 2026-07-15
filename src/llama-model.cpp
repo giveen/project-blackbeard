@@ -1281,16 +1281,13 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
 
 static void build_nvfp4_decode_cache(llama_model & model) {
     // Caller should check params.nvfp4_decode_cache before calling this function
-
-    // Gemma 4, Qwen3.5, and Qwen3VL all produce unusable output with the NVFP4
-    // decode cache (token id 49 spam, mixed-language garbage, etc.). The Q8_0 ->
-    // f32 -> NVFP4 requantization introduces enough numerical error to cause
-    // model divergence across every architecture tested so far.
-    // FIXME: debug the root cause before re-enabling for any architecture
-    LLAMA_LOG_WARN("%s: NVFP4 decode cache is disabled pending root-cause fix (produces unusable output)\n", __func__);
+    // Disabled: produces unusable output on all architectures tested.
+    // The NVFP4 format in GGML is incomplete (missing per-tensor F32 scale factor).
+    // Root cause: Q8_0 -> f32 -> NVFP4 requantization and native NVFP4 model
+    // inference both produce garbage due to missing derived tensor support.
+    // See: https://github.com/ggml-org/llama.cpp/discussions/22042
+    LLAMA_LOG_WARN("%s: NVFP4 decode cache is disabled (derived tensor support incomplete)\n", __func__);
     return;
-
-    LLAMA_LOG_INFO("%s: building NVFP4 decode cache for TG decode...\n", __func__);
     size_t total_fp4_bytes = 0;
     size_t count = 0;
     int cuda_dev_id = 0; // single GPU assumption for now
@@ -1344,7 +1341,23 @@ static void build_nvfp4_decode_cache(llama_model & model) {
         std::vector<uint8_t> host_fp4(fp4_size);
         quantize_row_nvfp4_ref(host_f32.data(), (block_nvfp4 *)host_fp4.data(), nelements);
 
-        // Step 4: Allocate GPU memory for FP4 cache
+        // Step 3b: Compute per-tensor F32 scale (ModelOpt NVFP4 convention)
+        // F32 = global_amax / (E2M1_MAX * E4M3_MAX) = max(|weights|) / (6.0f * 448.0f)
+        // Stored at the end of the cache buffer, applied post-vecdot in mmvq.cu
+        float per_tensor_scale = 1.0f;
+        {
+            float amax = 0.0f;
+            for (int64_t i = 0; i < nelements; i++) {
+                float v = fabsf(host_f32[i]);
+                if (v > amax) { amax = v; }
+            }
+            constexpr float E2M1_MAX = 6.0f;
+            constexpr float E4M3_MAX = 448.0f;
+            per_tensor_scale = amax / (E2M1_MAX * E4M3_MAX);
+            if (per_tensor_scale < 1.0f / 448.0f) { per_tensor_scale = 1.0f; }
+        }
+
+        // Step 4: Allocate GPU memory for FP4 cache + per-tensor scale
         void * fp4_data = nullptr;
 #if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
         cudaError_t ce = cudaSetDevice(cuda_dev_id);
@@ -1353,15 +1366,25 @@ static void build_nvfp4_decode_cache(llama_model & model) {
                           __func__, cuda_dev_id, cudaGetErrorString(ce), name.c_str());
             continue;
         }
-        ce = cudaMalloc(&fp4_data, fp4_size);
+        // Allocate extra float for per-tensor scale
+        ce = cudaMalloc(&fp4_data, fp4_size + sizeof(float));
         if (ce != cudaSuccess) {
             LLAMA_LOG_WARN("%s: cudaMalloc(%zu) failed: %s, skipping %s\n",
-                          __func__, fp4_size, cudaGetErrorString(ce), name.c_str());
+                          __func__, fp4_size + sizeof(float), cudaGetErrorString(ce), name.c_str());
             continue;
         }
+        // Upload NVFP4 block data
         ce = cudaMemcpy(fp4_data, host_fp4.data(), fp4_size, cudaMemcpyHostToDevice);
         if (ce != cudaSuccess) {
             LLAMA_LOG_WARN("%s: cudaMemcpy failed: %s, skipping %s\n",
+                          __func__, cudaGetErrorString(ce), name.c_str());
+            cudaFree(fp4_data);
+            continue;
+        }
+        // Upload per-tensor scale at end of buffer
+        ce = cudaMemcpy((char *)fp4_data + fp4_size, &per_tensor_scale, sizeof(float), cudaMemcpyHostToDevice);
+        if (ce != cudaSuccess) {
+            LLAMA_LOG_WARN("%s: cudaMemcpy per-tensor scale failed: %s, skipping %s\n",
                           __func__, cudaGetErrorString(ce), name.c_str());
             cudaFree(fp4_data);
             continue;
