@@ -134,7 +134,7 @@ static __global__ void quantize_mmq_nvfp4(
     const int64_t i2 = blockIdx.y % ne2;
     const int64_t i3 = blockIdx.y / ne2;
     const int64_t i01 = ids ? ids[i1] : i1;
-    const int64_t blocks_per_col = (ne0 + QK_K - 1) / QK_K;
+    const int64_t blocks_per_col = (ne0 + QK_FP4_MMQ - 1) / QK_FP4_MMQ;
     const int64_t base_idx = i3 * s03 + i2 * s02 + i01 * s01;
     const float * __restrict__  x_row = x + base_idx;
 
