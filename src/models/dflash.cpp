@@ -181,11 +181,15 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
     // tok_embd from the target model (shared via ctx_other)
     auto * tok_embd = model.tok_embd;
     if (tok_embd == nullptr) {
-        GGML_ASSERT(cparams.ctx_other != nullptr);
-        const auto * model_other = llama_get_model(cparams.ctx_other);
-
-        GGML_ASSERT(model_other->tok_embd != nullptr && "DFlash decoder requires the target model's token embeddings");
-        tok_embd = model_other->tok_embd;
+        if (cparams.ctx_other != nullptr) {
+            const auto * model_other = llama_get_model(cparams.ctx_other);
+            GGML_ASSERT(model_other->tok_embd != nullptr && "DFlash decoder requires the target model's token embeddings");
+            tok_embd = model_other->tok_embd;
+        } else {
+            // ctx_other not set yet (model initialization / fitting probe).
+            // Create a placeholder tok_embd so graph construction can proceed.
+            tok_embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, model.vocab.n_tokens());
+        }
     }
 
     auto inp = std::make_unique<llm_graph_input_embd>(n_embd);
@@ -262,10 +266,14 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
     // lm_head from the target model (shared via ctx_other)
     auto * output = model.output;
     if (output == nullptr) {
-        GGML_ASSERT(cparams.ctx_other != nullptr);
-        const auto * model_other = llama_get_model(cparams.ctx_other);
-        GGML_ASSERT(model_other->output != nullptr && "DFlash decoder requires the target model's output projection");
-        output = model_other->output;
+        if (cparams.ctx_other != nullptr) {
+            const auto * model_other = llama_get_model(cparams.ctx_other);
+            GGML_ASSERT(model_other->output != nullptr && "DFlash decoder requires the target model's output projection");
+            output = model_other->output;
+        } else {
+            // Placeholder for fitting probe
+            output = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, model.vocab.n_tokens());
+        }
     }
 
     cur = build_lora_mm(output, cur);

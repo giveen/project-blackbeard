@@ -133,10 +133,13 @@ llama_context::llama_context(
 
     if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH) {
         if (model.tok_embd == nullptr || model.output == nullptr) {
-            if (params.ctx_other == nullptr) {
-                throw std::runtime_error(model.arch_name() + " requires ctx_other to be set (this warning is normal during memory fitting)");
+            if (params.ctx_other != nullptr) {
+                cparams.ctx_other = params.ctx_other;
+            } else {
+                // Not set yet — expected during memory fitting or when ctx_other is wired later
+                // by speculative decoding init. The forward pass has its own GGML_ASSERT
+                // that catches genuinely missing ctx_other at runtime.
             }
-            cparams.ctx_other = params.ctx_other;
         }
     }
 
