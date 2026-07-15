@@ -168,16 +168,24 @@ FA on:
 
 
 
+
 ## NVFP4 Decode Cache (`--nvfp4-decode-cache`) — [DISABLED]
 
-**Status:** The NVFP4 decode cache produces unusable output (garbled text,
-token-id spam) on every architecture tested (Qwen3VL, Qwen3.5, Gemma 4).
-The feature is disabled at the code level pending a root-cause fix.
+**Status:** Disabled — produces unusable output on all architectures tested.
 
-The conversion path (Q8_0 -> CPU dequant to f32 -> CPU requant to NVFP4 ->
-GPU upload) introduces enough numerical error to cause model divergence.
-See `build_nvfp4_decode_cache` in `src/llama-model.cpp`.
+**Root cause:** NVIDIA's NVFP4 is a *derived tensor* format requiring a
+per-tensor F32 scale factor that GGML's `block_nvfp4` struct cannot represent.
+The dequant formula is `F4_nibble * F8_subblock_scale * F32_per_tensor_scale`,
+but the current code assumes `F32 = 1.0` for all tensors, which is incorrect.
 
-Speed benchmarks were collected but are meaningless — the model generates
-garbage at any speed.
-```
+**Upstream fix needed:** The GGML project is working on `ggml_mul_mat_ext()`
+to properly handle derived tensor formats with explicit scale tensor inputs.
+See [ggml-org/llama.cpp#22042](https://github.com/ggml-org/llama.cpp/discussions/22042).
+Until that lands, both native NVFP4 models and the Q8_0 -> NVFP4 decode cache
+path produce garbage output.
+
+**Native NVFP4 models** (converted via `conversion/base.py` -> `_repack_nvfp4`)
+are also affected — the per-tensor F32 scale stored as `*_in_s` tensors is
+applied via `build_lora_mm` in the MMQ path, but the MMVQ decode path
+doesn't properly apply it through the fusion mechanism for non-NVFP4 source
+tensors (see `ggml_cuda_mul_mat_vec_q` in `mmvq.cu`).
