@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Iterable, TYPE_CHECKING
-
 import torch
 
 if TYPE_CHECKING:
@@ -622,10 +622,40 @@ class _Qwen35MtpMixin:
 class Qwen3_5TextModel(_Qwen35MtpMixin, _Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35
 
+    def set_vocab(self):
+        tokens, toktypes, tokpre = self.get_vocab_base()
+        self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_types(toktypes)
+
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        if special_vocab.chat_template is None:
+            template_path = Path(__file__).parent.parent / "models" / "templates" / "Qwen3.6.jinja"
+            if template_path.is_file():
+                with open(template_path, "r", encoding="utf-8") as f:
+                    special_vocab.chat_template = f.read()
+        special_vocab.add_to_gguf(self.gguf_writer)
+
 
 @ModelBase.register("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
 class Qwen3_5MoeTextModel(_Qwen35MtpMixin, _Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
+
+    def set_vocab(self):
+        tokens, toktypes, tokpre = self.get_vocab_base()
+        self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_types(toktypes)
+
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        if special_vocab.chat_template is None:
+            template_path = Path(__file__).parent.parent / "models" / "templates" / "Qwen3.6.jinja"
+            if template_path.is_file():
+                with open(template_path, "r", encoding="utf-8") as f:
+                    special_vocab.chat_template = f.read()
+        special_vocab.add_to_gguf(self.gguf_writer)
 
 
 @ModelBase.register("DFlashDraftModel")
