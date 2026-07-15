@@ -1,5 +1,11 @@
 # Project Blackbeard
 
+<picture>
+  <img alt="Project Blackbeard" src="media/chat-splash.png" width="700">
+</picture>
+
+
+
 > A Blackwell-focused performance fork of `llama.cpp`, targeting NVIDIA RTX 50-series / SM100 hardware.
 
 This project is built on the excellent foundation of [llama.cpp](https://github.com/ggml-org/llama.cpp), which was created and is maintained by [Georgi Gerganov](https://github.com/ggerganov) and the [ggml-org](https://github.com/ggml-org) community. We respectfully acknowledge that work; Project Blackbeard is a narrow downstream optimization effort focused on one hardware family, not an upstream replacement.
