@@ -231,11 +231,20 @@ static __device__ void quantize_f32_nvfp4_block(const float * __restrict__ x, bl
         y->d[s] = ue;
         const float d = ggml_cuda_ue4m3_to_fp32(ue);
 
-        // Quantize elements to E2M1 FP4 and pack (2 per byte)
+        // Quantize elements to E2M1 FP4 using same kvalues lookup as CPU ref
         for (int j = 0; j < qk_sub / 2; ++j) {
-            const uint8_t x0 = ggml_cuda_float_to_fp4_e2m1(xb[0        + j], 1.0f/d);
-            const uint8_t x1 = ggml_cuda_float_to_fp4_e2m1(xb[qk_sub/2 + j], 1.0f/d);
-            y->qs[s * (qk_sub / 2) + j] = x0 | (x1 << 4);
+            // Match CPU best_index_mxfp4: minimize |kvalues_mxfp4[i] * d - x|
+            float best_err0 = fabsf((float)kvalues_mxfp4[0] * d - xb[0        + j]);
+            int   best_i0   = 0;
+            float best_err1 = fabsf((float)kvalues_mxfp4[0] * d - xb[qk_sub/2 + j]);
+            int   best_i1   = 0;
+            for (int i = 1; i < 16; i++) {
+                float err = fabsf((float)kvalues_mxfp4[i] * d - xb[0        + j]);
+                if (err < best_err0) { best_err0 = err; best_i0 = i; }
+                err = fabsf((float)kvalues_mxfp4[i] * d - xb[qk_sub/2 + j]);
+                if (err < best_err1) { best_err1 = err; best_i1 = i; }
+            }
+            y->qs[s * (qk_sub / 2) + j] = (uint8_t)best_i0 | ((uint8_t)best_i1 << 4);
         }
     }
 }
