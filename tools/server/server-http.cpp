@@ -303,20 +303,6 @@ bool server_http_context::init(const common_params & params) {
             res.set_content("", "text/html"); // blank response, no data
             return httplib::Server::HandlerResponse::Handled; // skip further processing
         }
-        if (!origin_ok) {
-            res.status = 403;
-            res.set_content(
-                safe_json_to_str(json {
-                    {"error", {
-                        {"message", "Origin not allowed"},
-                        {"type", "cors_error"},
-                        {"code", 403}
-                    }}
-                }),
-                "application/json; charset=utf-8"
-            );
-            return httplib::Server::HandlerResponse::Handled;
-        }
         if (!middleware_server_state(req, res)) {
             return httplib::Server::HandlerResponse::Handled;
         }
