@@ -1,4 +1,4 @@
-# Project Blackbear — Blackwell FP4 Benchmark
+# Project Blackbeard — Blackwell FP4 Benchmark
 
 > **Date:** 2026-07-15
 > **Build:** `a58222229` (b10027), backends stripped to CPU + CUDA only
