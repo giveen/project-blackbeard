@@ -32,8 +32,8 @@ fi
 cd "$LLAMA_DIR"
 
 echo "--- Checking for updates ---"
-# Ensure we're on master (not detached HEAD) so git pull works
-git checkout master 2>/dev/null || true
+# Ensure we're on main (not detached HEAD) so git pull works
+git checkout main 2>/dev/null || true
 git pull || echo "--- Warning: git pull failed, proceeding with local source ---"
 
 echo "--- Pre-fetching UI assets ---"
