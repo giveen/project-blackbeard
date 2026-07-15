@@ -29,6 +29,41 @@ static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32
 }
 
 // q4 contains 8 indices with 4 bit each.
+// prmt.b32-based 8-entry lookup for NVFP4 E2M1 format (positive half of kvalues_fp4).
+// Encodes the 8 positive values {0, 1, 2, 3, 4, 6, 8, 12} as two uint32 register
+// constants (bytes: 0x00,0x01,0x02,0x03 and 0x04,0x06,0x08,0x0C). Uses prmt.b32 to
+// select 4 bytes at once using 3-bit magnitude indices. No SMEM/constant-memory
+// table load required — the table lives in registers.
+// For sign handling: the 4th bit of each index nibble selects negation via XOR + add.
+static __device__ __forceinline__ int2 get_int_from_table_8_prmt(const int & q4) {
+    // Positive FP4 values packed as bytes in two uint32 registers.
+    const uint32_t kLutLo = 0x03020100u;  // bytes: [0, 1, 2, 3]
+    const uint32_t kLutHi = 0x0C080604u;  // bytes: [4, 6, 8, 12]
+
+    // Mask sign bits and extract magnitude (low 3 bits of each nibble).
+    const uint32_t mag       = q4 & 0x07070707;
+    const uint32_t sign_bits = q4 & 0x08080808;
+
+    // prmt.b32: each nibble in mag selects one byte from kLutLo (nibble<4)
+    // or kLutHi (nibble>=4). Returns 4 packed bytes.
+    uint32_t v;
+    asm volatile("prmt.b32 %0, %1, %2, %3;\n"
+        : "=r"(v)
+        : "r"(kLutLo), "r"(kLutHi), "r"(mag));
+
+    // Two's complement negation via XOR + add for bytes with sign bit set.
+    // sign_bits>>3 gives 0x01010101 per byte when sign=1, 0x00 when sign=0.
+    // XOR inverts the magnitude bytes where sign is set (~v for those bytes),
+    // then adding 1 completes the two's complement negation.
+    const uint32_t negated = (v ^ (sign_bits >> 3)) + ((sign_bits >> 3) & 0x01010101);
+
+    // Even/odd split to match caller's int2 convention:
+    //   .x = bytes 0,2,4,6   .y = bytes 1,3,5,7
+    return make_int2(
+        __byte_perm(negated, 0, 0x6420),
+        __byte_perm(negated, 0, 0x7531));
+}
+
 // This function selects those bytes from table that are at those indices and returns them as int2.
 // The first int contains the bytes with even indices in q4, the second int contains the bytes with odd indices in q4.
 static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, const int8_t * table) {
@@ -357,13 +392,13 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1_blackwell(
     // Sub-blocks 0,1: load qs[0..3]
     const int32_t qs00 = qs32[0];
     const int32_t qs01 = qs32[1];
-    int2 v00 = get_int_from_table_16(qs00, kvalues_mxfp4);
-    int2 v01 = get_int_from_table_16(qs01, kvalues_mxfp4);
+    int2 v00 = get_int_from_table_8_prmt(qs00);
+    int2 v01 = get_int_from_table_8_prmt(qs01);
 
     const int32_t qs10 = qs32[2];
     const int32_t qs11 = qs32[3];
-    int2 v10 = get_int_from_table_16(qs10, kvalues_mxfp4);
-    int2 v11 = get_int_from_table_16(qs11, kvalues_mxfp4);
+    int2 v10 = get_int_from_table_8_prmt(qs10);
+    int2 v11 = get_int_from_table_8_prmt(qs11);
 
     // Sub-blocks 0,1 share one q8_1 block:
     //   sub0 uses qs[0..3] (first 16 elements), sub1 uses qs[4..7] (second 16)
@@ -382,13 +417,13 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1_blackwell(
     // Sub-blocks 2,3: load qs[4..7]
     const int32_t qs20 = qs32[4];
     const int32_t qs21 = qs32[5];
-    int2 v20 = get_int_from_table_16(qs20, kvalues_mxfp4);
-    int2 v21 = get_int_from_table_16(qs21, kvalues_mxfp4);
+    int2 v20 = get_int_from_table_8_prmt(qs20);
+    int2 v21 = get_int_from_table_8_prmt(qs21);
 
     const int32_t qs30 = qs32[6];
     const int32_t qs31 = qs32[7];
-    int2 v30 = get_int_from_table_16(qs30, kvalues_mxfp4);
-    int2 v31 = get_int_from_table_16(qs31, kvalues_mxfp4);
+    int2 v30 = get_int_from_table_8_prmt(qs30);
+    int2 v31 = get_int_from_table_8_prmt(qs31);
 
     const block_q8_1 * bq8_2 = bq8_1 + 1;
 
@@ -425,8 +460,8 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
         const int32_t iqs0 = iqs + 2*i;
         const int32_t iqs1 = iqs0 + 1;
         const int32_t is = iqs0 >> 1;
-        const int2 v0 = get_int_from_table_16(get_int_b4(bq4->qs, iqs0), kvalues_mxfp4);
-        const int2 v1 = get_int_from_table_16(get_int_b4(bq4->qs, iqs1), kvalues_mxfp4);
+        const int2 v0 = get_int_from_table_8_prmt(get_int_b4(bq4->qs, iqs0));
+        const int2 v1 = get_int_from_table_8_prmt(get_int_b4(bq4->qs, iqs1));
         const block_q8_1 * bq8 = bq8_1 + (is >> 1);
         const int32_t i8 = ((is & 1) << 2);
 

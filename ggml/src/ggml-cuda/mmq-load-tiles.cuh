@@ -1714,8 +1714,8 @@ template <ggml_type type, int J, bool fallback, bool force_w4a8 = false> static 
 
 #pragma unroll
         for (int sub = 0; sub < QK_NVFP4 / QK_NVFP4_SUB; ++sub) {
-            const int2 q0 = get_int_from_table_16(src_qs[2 * sub + 0], kvalues_mxfp4);
-            const int2 q1 = get_int_from_table_16(src_qs[2 * sub + 1], kvalues_mxfp4);
+            const int2 q0 = get_int_from_table_8_prmt(src_qs[2 * sub + 0]);
+            const int2 q1 = get_int_from_table_8_prmt(src_qs[2 * sub + 1]);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
             x_qs[i*sram_stride + kqs + 4 * sub + 0] = q0.x;
