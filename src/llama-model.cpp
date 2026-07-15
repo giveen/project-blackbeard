@@ -1282,14 +1282,13 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
 static void build_nvfp4_decode_cache(llama_model & model) {
     // Caller should check params.nvfp4_decode_cache before calling this function
 
-    // Gemma 4 produces unusable output with the NVFP4 decode cache (token ID 49
-    // spam). The Q8_0 -> f32 -> NVFP4 requantization or the stride remapping in
-    // the MMVQ dispatch produces incorrect results for this architecture.
-    // TODO: investigate root cause and fix
-    if (model.arch == LLM_ARCH_GEMMA4 || model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
-        LLAMA_LOG_WARN("%s: NVFP4 decode cache is not yet compatible with Gemma 4, skipping\n", __func__);
-        return;
-    }
+    // Gemma 4, Qwen3.5, and Qwen3VL all produce unusable output with the NVFP4
+    // decode cache (token id 49 spam, mixed-language garbage, etc.). The Q8_0 ->
+    // f32 -> NVFP4 requantization introduces enough numerical error to cause
+    // model divergence across every architecture tested so far.
+    // FIXME: debug the root cause before re-enabling for any architecture
+    LLAMA_LOG_WARN("%s: NVFP4 decode cache is disabled pending root-cause fix (produces unusable output)\n", __func__);
+    return;
 
     LLAMA_LOG_INFO("%s: building NVFP4 decode cache for TG decode...\n", __func__);
     size_t total_fp4_bytes = 0;
