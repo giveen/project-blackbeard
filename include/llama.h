@@ -326,9 +326,10 @@ extern "C" {
         bool use_mlock;       // force system to keep model in RAM
         bool check_tensors;   // validate model tensor data
         bool use_extra_bufts; // use extra buffer types (used for weight repacking)
+        bool nvfp4_decode_cache; // convert Q8_0 weights to NVFP4 at load for faster TG decode
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
-    };
+};
 
     struct llama_sampler_seq_config {
         llama_seq_id           seq_id;

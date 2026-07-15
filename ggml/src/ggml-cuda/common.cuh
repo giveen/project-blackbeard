@@ -1209,6 +1209,13 @@ struct ggml_cuda_pool_alloc {
 struct ggml_tensor_extra_gpu {
     void * data_device[GGML_CUDA_MAX_DEVICES]; // 1 pointer for each device for split tensors
     cudaEvent_t events[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS]; // events for synchronizing multiple GPUs
+
+    // NVFP4 decode cache: companion buffer holding FP4-quantized copy of this
+    // tensor's weights. When fp4_data is non-NULL, MMVQ decode reads from
+    // this instead of data_device during TG. fp4_buf_handle is the owning
+    // ggml_backend_buffer_t cast to void* (common.cuh doesn't define the type).
+    void *fp4_data;         // device pointer to NVFP4 weight data (NULL if no cache)
+    void *fp4_buf_handle;   // owning backend buffer handle (NULL if no cache)
 };
 
 

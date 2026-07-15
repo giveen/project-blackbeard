@@ -1,6 +1,7 @@
 #include "mmvq.cuh"
 #include "quantize.cuh"
 #include "unary.cuh"
+#include "common.cuh"
 
 #include <cstdint>
 
@@ -1264,11 +1265,28 @@ void ggml_cuda_mul_mat_vec_q(
 
     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
 
+    // Check for NVFP4 decode cache on src0: when tensor->extra is non-NULL it
+    // points directly to the NVFP4 data on GPU (raw cudaMalloc pointer, set by
+    // build_nvfp4_decode_cache during model load). Route through NVFP4 MMVQ path.
+    void *                   vx          = (void *)src0->data;
+    ggml_type                vx_type     = src0->type;
+    int64_t                  vx_s01      = s01;
+    int64_t                  vx_s02      = s02;
+    int64_t                  vx_s03      = s03;
+    if (src0->extra) {
+        vx      = src0->extra;  // raw NVFP4 data pointer
+        vx_type = GGML_TYPE_NVFP4;
+        // The FP4 cache is laid out contiguously: compute strides in NVFP4 blocks
+        vx_s01  = ne00 / QK_NVFP4;                           // blocks per row
+        vx_s02  = ne01 * vx_s01;                             // blocks per channel slice
+        vx_s03  = ne02 * vx_s02;                             // blocks per sample
+    }
+
     mul_mat_vec_q_switch_type(
-        src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
-        ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
-        ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
-        ne03,              ne3,           s03, s13,              s3,               ids_stride, stream);
+        vx, vx_type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
+        ne01,              ncols_dst,     vx_s01, stride_col_y,     stride_col_dst,
+        ne02, nchannels_y, nchannels_dst, vx_s02, stride_channel_y, stride_channel_dst,
+        ne03,              ne3,           vx_s03, s13,              s3,               ids_stride, stream);
 }
 
 void ggml_cuda_op_mul_mat_vec_q(

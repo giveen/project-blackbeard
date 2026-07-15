@@ -1,3 +1,7 @@
+#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
+#include <cuda_runtime.h>
+#endif
+
 #include "llama-model.h"
 
 #include "llama-arch.h"
@@ -19,6 +23,7 @@
 #include "models/models.h"
 
 #include "ggml.h"
+#include "../ggml/src/ggml-quants.h"
 #include "ggml-cpp.h"
 
 #include <algorithm>
@@ -1074,6 +1079,16 @@ llama_model::~llama_model() {
     for (auto * lora : loras) {
         delete lora;
     }
+
+    // Free NVFP4 decode cache memory (stored as raw CUDA pointer in tensor->extra)
+    for (auto & [name, tensor] : tensors_by_name) {
+        if (tensor->extra) {
+#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
+            cudaFree(tensor->extra);
+#endif
+            tensor->extra = nullptr;
+        }
+    }
 }
 
 void llama_model_base::load_stats(llama_model_loader & ml) {
@@ -1257,20 +1272,113 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     pimpl->n_bytes = ml.n_bytes;
 
     pimpl->desc_str = arch_name() + " " + type_name() + " " + ml.ftype_name();
-
-    pimpl->ftype = ml.ftype;
-
-    if (hparams.f_max_alibi_bias > 0.0f) {
-        hparams.use_alibi = true;
-    }
-
-    hparams.rope_type = llama_model_rope_type(this);
 }
 
 void llama_model_base::load_vocab(llama_model_loader & ml) {
     const auto kv = LLM_KV(arch);
-
     vocab.load(ml, kv);
+}
+
+static void build_nvfp4_decode_cache(llama_model & model) {
+    // Caller should check params.nvfp4_decode_cache before calling this function
+    LLAMA_LOG_INFO("%s: building NVFP4 decode cache for TG decode...\n", __func__);
+    size_t total_fp4_bytes = 0;
+    size_t count = 0;
+    int cuda_dev_id = 0; // single GPU assumption for now
+
+    for (auto & [name, tensor] : model.tensors_by_name) {
+        if (!tensor || !tensor->buffer) {
+            continue;
+        }
+        if (!ggml_is_quantized(tensor->type)) {
+            continue;
+        }
+        if (tensor->type == GGML_TYPE_NVFP4) {
+            continue; // already NVFP4, no cache needed
+        }
+        if (tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16) {
+            continue; // float types, not worth converting
+        }
+        if (tensor->extra) {
+            continue; // already has a cache entry
+        }
+
+        const size_t tensor_bytes = ggml_nbytes(tensor);
+        if (tensor_bytes < 1024 * 1024) {
+            continue; // skip tensors smaller than 1 MiB
+        }
+
+        const int64_t nelements = ggml_nelements(tensor);
+        const int64_t ne00 = tensor->ne[0];
+        // Only convert if divisible by QK_NVFP4 (64)
+        if (ne00 % 64 != 0) {
+            continue;
+        }
+
+        // Step 1: Download original quantized weights from GPU to CPU
+        std::vector<uint8_t> host_orig(tensor_bytes);
+        ggml_backend_tensor_get(tensor, host_orig.data(), 0, tensor_bytes);
+
+        // Step 2: Dequantize to F32 on CPU via type traits table
+        std::vector<float> host_f32(nelements);
+        const struct ggml_type_traits * tt = ggml_get_type_traits(tensor->type);
+        if (!tt || !tt->to_float) {
+            LLAMA_LOG_WARN("%s: no dequantizer for %s, skipping %s\n",
+                          __func__, ggml_type_name(tensor->type), name.c_str());
+            continue;
+        }
+        tt->to_float(host_orig.data(), host_f32.data(), nelements);
+
+        // Step 3: Re-quantize to NVFP4 on CPU
+        const int64_t nblocks = (nelements + QK_NVFP4 - 1) / QK_NVFP4;
+        const size_t fp4_size = nblocks * sizeof(block_nvfp4);
+        std::vector<uint8_t> host_fp4(fp4_size);
+        quantize_row_nvfp4_ref(host_f32.data(), (block_nvfp4 *)host_fp4.data(), nelements);
+
+        // Step 4: Allocate GPU memory for FP4 cache
+        void * fp4_data = nullptr;
+#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
+        cudaError_t ce = cudaSetDevice(cuda_dev_id);
+        if (ce != cudaSuccess) {
+            LLAMA_LOG_WARN("%s: cudaSetDevice(%d) failed: %s, skipping %s\n",
+                          __func__, cuda_dev_id, cudaGetErrorString(ce), name.c_str());
+            continue;
+        }
+        ce = cudaMalloc(&fp4_data, fp4_size);
+        if (ce != cudaSuccess) {
+            LLAMA_LOG_WARN("%s: cudaMalloc(%zu) failed: %s, skipping %s\n",
+                          __func__, fp4_size, cudaGetErrorString(ce), name.c_str());
+            continue;
+        }
+        ce = cudaMemcpy(fp4_data, host_fp4.data(), fp4_size, cudaMemcpyHostToDevice);
+        if (ce != cudaSuccess) {
+            LLAMA_LOG_WARN("%s: cudaMemcpy failed: %s, skipping %s\n",
+                          __func__, cudaGetErrorString(ce), name.c_str());
+            cudaFree(fp4_data);
+            continue;
+        }
+#else
+        LLAMA_LOG_WARN("%s: CUDA not available, skipping NVFP4 decode cache\n", __func__);
+        return;
+#endif
+
+        // Step 5: Store FP4 cache pointer in tensor->extra (raw CUDA pointer)
+        tensor->extra = (void *)fp4_data;
+
+        total_fp4_bytes += fp4_size;
+        count++;
+
+        LLAMA_LOG_INFO("%s:   NVFP4 cache for %-45s %8.2f MiB (%s -> NVFP4)\n",
+                      __func__, name.c_str(), fp4_size / 1024.0 / 1024.0,
+                      ggml_type_name(tensor->type));
+    }
+
+    if (count > 0) {
+        LLAMA_LOG_INFO("%s: NVFP4 decode cache: %zu tensors cached, %.2f MiB total\n",
+                      __func__, count, total_fp4_bytes / 1024.0 / 1024.0);
+    } else {
+        LLAMA_LOG_INFO("%s: no tensors qualified for NVFP4 decode cache\n", __func__);
+    }
 }
 
 bool llama_model_base::load_tensors(llama_model_loader & ml) {
@@ -1677,7 +1785,10 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             return false;
         }
     }
-
+    // Build NVFP4 decode cache (must happen after weight upload but before first inference)
+    if (params.nvfp4_decode_cache) {
+        build_nvfp4_decode_cache(*this);
+    }
     if (use_mmap_buffer) {
         for (auto & mapping : ml.mappings) {
             pimpl->mappings.emplace_back(std::move(mapping));
@@ -2361,6 +2472,7 @@ llama_model_params llama_model_default_params() {
         /*.use_mlock                   =*/ false,
         /*.check_tensors               =*/ false,
         /*.use_extra_bufts             =*/ true,
+        /*.nvfp4_decode_cache          =*/ false,
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
     };

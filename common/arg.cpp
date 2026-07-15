@@ -2193,6 +2193,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_NO_HOST"));
     add_opt(common_arg(
+        {"--nvfp4-decode-cache"},
+        "convert Q8_0/Q6_K weights to NVFP4 at load for ~25% faster TG decode",
+        [](common_params & params) {
+            params.nvfp4_decode_cache = true;
+        }
+    ));
+    add_opt(common_arg(
         {"-ctk", "--cache-type-k"}, "TYPE",
         string_format(
             "KV cache data type for K\n"

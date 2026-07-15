@@ -359,6 +359,7 @@ struct cmd_params {
     bool                             verbose;
     bool                             progress;
     bool                             no_warmup;
+    bool                             nvfp4_decode_cache;
     output_formats                   output_format;
     output_formats                   output_format_stderr;
 };
@@ -403,6 +404,7 @@ static const cmd_params cmd_params_defaults = {
     /* delay                */ 0,
     /* verbose              */ false,
     /* progress             */ false,
+    /* nvfp4_decode_cache     */ false,
     /* no_warmup            */ false,
     /* output_format        */ MARKDOWN,
     /* output_format_stderr */ NONE,
@@ -865,28 +867,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = string_split<bool>(argv[i], split_delim);
                 params.no_host.insert(params.no_host.end(), p.begin(), p.end());
-            } else if (arg == "-ts" || arg == "--tensor-split") {
+            } else if (arg == "--nvfp4-decode-cache") {
                 if (++i >= argc) {
                     invalid_param = true;
                     break;
                 }
-                for (auto ts : string_split<std::string>(argv[i], split_delim)) {
-                    // split string by ; and /
-                    const std::regex           regex{ R"([;/]+)" };
-                    std::sregex_token_iterator it{ ts.begin(), ts.end(), regex, -1 };
-                    std::vector<std::string>   split_arg{ it, {} };
-                    GGML_ASSERT(split_arg.size() <= llama_max_devices());
-
-                    std::vector<float> tensor_split(llama_max_devices());
-                    for (size_t i = 0; i < llama_max_devices(); ++i) {
-                        if (i < split_arg.size()) {
-                            tensor_split[i] = std::stof(split_arg[i]);
-                        } else {
-                            tensor_split[i] = 0.0f;
-                        }
-                    }
-                    params.tensor_split.push_back(tensor_split);
-                }
+                auto p = string_split<bool>(argv[i], split_delim);
+                params.nvfp4_decode_cache = p[0];
             } else if (arg == "-ot" || arg == "--override-tensor") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1181,6 +1168,7 @@ struct cmd_params_instance {
     bool               embeddings;
     bool               no_op_offload;
     bool               no_host;
+    bool               nvfp4_decode_cache;
     size_t             fit_target;
     uint32_t           fit_min_ctx;
 
@@ -1195,8 +1183,7 @@ struct cmd_params_instance {
         mparams.main_gpu      = main_gpu;
         mparams.tensor_split  = tensor_split.data();
         mparams.use_mmap      = use_mmap;
-        mparams.use_direct_io = use_direct_io;
-        mparams.no_host       = no_host;
+        mparams.nvfp4_decode_cache = nvfp4_decode_cache;
 
         if (n_cpu_moe <= 0) {
             if (tensor_buft_overrides.empty()) {
@@ -1327,6 +1314,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .nvfp4_decode_cache = */ params.nvfp4_decode_cache,
                 /* .fit_target   = */ fpt,
                 /* .fit_min_ctx  = */ fpc,
             };
@@ -1364,6 +1352,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .nvfp4_decode_cache = */ params.nvfp4_decode_cache,
                 /* .fit_target   = */ fpt,
                 /* .fit_min_ctx  = */ fpc,
             };
@@ -1401,6 +1390,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .nvfp4_decode_cache = */ params.nvfp4_decode_cache,
                 /* .fit_target   = */ fpt,
                 /* .fit_min_ctx  = */ fpc,
             };
