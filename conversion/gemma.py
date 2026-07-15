@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 
 from typing import Callable, Iterable, TYPE_CHECKING, Sequence
@@ -648,9 +649,19 @@ class Gemma4Model(Gemma3Model):
         self.gguf_writer.add_token_types(toktypes)
 
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        if special_vocab.chat_template is None:
+            # Fall back to a model-size-appropriate Gemma 4 template
+            n_layer = self.hparams.get("num_hidden_layers", 0)
+            # 12B = 48 layers, 31B = 60 layers, E2B/E4B have different counts
+            if n_layer <= 48:
+                template_name = "google-gemma-4-12B-it.jinja"
+            else:
+                template_name = "google-gemma-4-31B-it.jinja"
+            template_path = Path(__file__).parent.parent / "models" / "templates" / template_name
+            if template_path.is_file():
+                with open(template_path, "r", encoding="utf-8") as f:
+                    special_vocab.chat_template = f.read()
         special_vocab.add_to_gguf(self.gguf_writer)
-        self.gguf_writer.add_add_space_prefix(False)
-        self.gguf_writer.add_add_bos_token(True)
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
