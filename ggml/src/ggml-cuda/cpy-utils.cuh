@@ -211,6 +211,34 @@ static __device__ void cpy_blck_f32_iq4_nl(const char * cxi, char * cdsti) {
     quantize_f32_iq4_nl_block((const float *)cxi, (block_iq4_nl *)cdsti);
 }
 
+static __device__ void quantize_f32_nvfp4_block(const float * __restrict__ x, block_nvfp4 * __restrict__ y) {
+    constexpr int qk = QK_NVFP4;
+    constexpr int qk_sub = QK_NVFP4_SUB;
+    constexpr int n_sub = QK_NVFP4 / QK_NVFP4_SUB;
+
+    for (int s = 0; s < n_sub; s++) {
+        const float * xb = x + s * qk_sub;
+
+        // Find max absolute value in the sub-block
+        float amax = 0.0f;
+        for (int j = 0; j < qk_sub; j++) {
+            const float v = fabsf(xb[j]);
+            if (v > amax) amax = v;
+        }
+
+        // Compute UE4M3 scale: amax / 6.0 maps the max E2M1 value (6.0) to amax
+        const uint8_t ue = ggml_cuda_fp32_to_ue4m3(amax / 6.0f);
+        y->d[s] = ue;
+        const float d = ggml_cuda_ue4m3_to_fp32(ue);
+
+        // Quantize elements to E2M1 FP4 and pack (2 per byte)
+        for (int j = 0; j < qk_sub / 2; ++j) {
+            const uint8_t x0 = ggml_cuda_float_to_fp4_e2m1(xb[0        + j], 1.0f/d);
+            const uint8_t x1 = ggml_cuda_float_to_fp4_e2m1(xb[qk_sub/2 + j], 1.0f/d);
+            y->qs[s * (qk_sub / 2) + j] = x0 | (x1 << 4);
+        }
+    }
+}
 template<typename src_t, typename dst_t>
 static __device__ void cpy_1_scalar(const char * cxi, char * cdsti) {
     *(dst_t *) cdsti = ggml_cuda_cast<dst_t>(*(const src_t *) cxi);
