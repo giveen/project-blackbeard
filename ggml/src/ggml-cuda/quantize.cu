@@ -134,24 +134,7 @@ static __global__ void quantize_mmq_nvfp4(
     const int64_t i2 = blockIdx.y % ne2;
     const int64_t i3 = blockIdx.y / ne2;
     const int64_t i01 = ids ? ids[i1] : i1;
-<<<<<<< HEAD
     const int64_t blocks_per_col = (ne0 + QK_K - 1) / QK_K;
-=======
-    const int64_t k_block = i0_base / QK_FP4_MMQ;
-    const int64_t blocks_per_col = (ne0 + QK_FP4_MMQ - 1) / QK_FP4_MMQ;
-    if (k_block >= blocks_per_col) {
-        return;
-    }
-
-    const int64_t ib = blockIdx.z * ((int64_t) blocks_per_col * ne1) + k_block * ne1 + blockIdx.x;
-    block_fp4_mmq * y = (block_fp4_mmq *) vy;
-    block_fp4_mmq * yb = y + ib;
-
-    const int sub = (i0_base % QK_FP4_MMQ) / QK_NVFP4_SUB;
-
-    float vals_raw[QK_NVFP4_SUB];
-    float amax_raw = 0.0f;
->>>>>>> f6f12e43f (CUDA: tighter MMQ src1 buffer size for native fp4 (#25613))
     const int64_t base_idx = i3 * s03 + i2 * s02 + i01 * s01;
     const float * __restrict__  x_row = x + base_idx;
 
