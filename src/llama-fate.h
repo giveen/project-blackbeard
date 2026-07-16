@@ -35,6 +35,7 @@ extern "C" {
     void   fate_prefetch_free_pinned(void * p);
     void   fate_debug_d2h(void * dst, const void * src, size_t n);
     int    fate_debug_ptr_type(const void * ptr);
+    void   fate_prefetch_d2d(void * backend_ptr, void * dst, const void * src, size_t n);
 }
 
 // ---------------------------------------------------------------------------

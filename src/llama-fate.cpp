@@ -356,16 +356,17 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
     if (layer < 0 || kind < 0 || (uint32_t)layer >= n_layer) return false;
     if (!pool.pool_tensor) return false;
 
-    // Handle the copy ourselves
-    ggml_backend_tensor_set_async(backend, dst, src_data, offset, size);
-
     // Track the expert access for prediction
     prefetch.on_expert((uint32_t)layer, expert_id);
 
     // --- layer transition: prefetch predicted experts for the next layer ---
     if (layer != prefetch.last_layer) {
         if (prefetch.last_layer >= 0 && prefetch.stream) {
+            // Synchronously prefetch predicted experts for the next layer
             prefetch.on_layer_done((uint32_t)prefetch.last_layer, pool);
+            // Wait for prefetch stream to finish before main stream proceeds
+            // (avoids graph capture issues with cross-stream events)
+            fate_prefetch_sync(prefetch.stream);
         }
         if (layer < prefetch.last_layer || prefetch.last_layer < 0) {
             prefetch.on_token_start(pool);
@@ -380,19 +381,24 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
     auto it = pool.key_to_slot.find(key);
 
     if (it != pool.key_to_slot.end()) {
+        // Cache hit — D2D copy from pool slot to dst (~500 GB/s)
         stats.hits++;
         pool.slots[it->second].last_used = ++pool.tick;
-        // Cache hit — would do D2D copy from pool slot to dst
-        // But ggml_backend_tensor_set_async only supports H2D
+        void * slot_ptr = pool.slot_device_ptr(it->second);
+        fate_prefetch_d2d((void *)backend, (char *)dst->data + offset, slot_ptr, size);
+        return true;
     }
 
-    // Cache miss — write to pool from the CPU source
+    // Cache miss — copy from CPU source (PCIe ~25 GB/s) and write to pool
     stats.misses++;
     int32_t slot = pool.find_or_alloc(key);
     if (slot >= 0) {
+        ggml_backend_tensor_set_async(backend, dst, src_data, offset, size);
         ggml_backend_tensor_set_async(backend, pool.pool_tensor,
                                        src_data,
                                        (size_t)slot * pool.slot_bytes, size);
+    } else {
+        ggml_backend_tensor_set_async(backend, dst, src_data, offset, size);
     }
 
     return true;
