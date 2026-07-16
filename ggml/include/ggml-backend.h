@@ -351,6 +351,25 @@ extern "C" {
     // Set a callback to be called for each resulting node during graph compute
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
 
+    // Expert copy hook — called per-expert during MUL_MAT_ID weight copies.
+    // Return true if the hook handled the copy (e.g. from a GPU-resident cache), false to fall
+    // back to the default CPU→GPU path.
+    typedef bool (*ggml_backend_sched_expert_hook_fn)(
+            void *             user_data,
+            ggml_backend_t     backend,
+            struct ggml_tensor * dst,
+            const void *       src_data,
+            size_t             offset,
+            size_t             size,
+            int32_t            expert_id,
+            int64_t            n_expert,
+            const char *       tensor_name);
+
+    GGML_API void ggml_backend_sched_set_expert_hook(
+            ggml_backend_sched_t               sched,
+            ggml_backend_sched_expert_hook_fn   fn,
+            void *                              user_data);
+
     //
     // Meta backend
     //

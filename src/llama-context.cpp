@@ -10,6 +10,7 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
+#include "llama-fate.h"
 #include "llama.h"
 
 #include <algorithm>
@@ -4215,4 +4216,40 @@ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * c
 
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
+}
+
+// ---------------------------------------------------------------------------
+// FATE: Fast Expert Caching for MoE Inference
+// ---------------------------------------------------------------------------
+
+bool llama_fate_init(llama_context * ctx, int32_t cache_mb) {
+    if (!ctx) return false;
+
+    const auto & model = ctx->get_model();
+    if (model.hparams.n_expert == 0) return false;
+
+    ggml_backend_t gpu = nullptr;
+    const int nb = ggml_backend_sched_get_n_backends(ctx->get_sched());
+    for (int i = 0; i < nb - 1; i++) {
+        gpu = ggml_backend_sched_get_backend(ctx->get_sched(), i);
+        break;
+    }
+    if (!gpu) return false;
+
+    static fate_system instance;
+    if (!instance.init(model, gpu, cache_mb)) return false;
+    g_fate = &instance;
+
+    ggml_backend_sched_set_expert_hook(ctx->get_sched(),
+        [](void * ud, ggml_backend_t be, ggml_tensor * dst,
+           const void * src, size_t off, size_t sz,
+           int32_t eid, int64_t ne, const char * name) -> bool {
+            return ((fate_system *)ud)->on_expert_copy(be, dst, src, off, sz, eid, ne, name);
+        },
+        g_fate);
+    return true;
+}
+
+void llama_fate_print_stats(void) {
+    if (g_fate) g_fate->print_stats();
 }

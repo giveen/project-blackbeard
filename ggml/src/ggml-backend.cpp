@@ -813,6 +813,8 @@ struct ggml_backend_sched {
     ggml_backend_sched_eval_callback callback_eval;
     void * callback_eval_user_data;
 
+    ggml_backend_sched_expert_hook_fn expert_hook;
+    void * expert_hook_user_data;
     char * context_buffer;
     size_t context_buffer_size;
 
@@ -915,6 +917,17 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
         // not an ideal solution
         if (tensor->op != GGML_OP_ROPE && src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
             int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
+            // when expert hook is set, force MUL_MAT_ID to highest-priority GPU backend
+            // so the selective expert copy path activates (enables caching)
+            if (sched->expert_hook && tensor->op == GGML_OP_MUL_MAT_ID &&
+                src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
+                for (int b = 0; b < src_backend_id; b++) {
+                    if (ggml_backend_supports_op(sched->backends[b], tensor)) {
+                        SET_CAUSE(tensor, "1.fate");
+                        return b;
+                    }
+                }
+            }
             // check if a backend with higher prio wants to offload the op
             if (sched->op_offload && src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
                 for (int b = 0; b < src_backend_id; b++) {
@@ -1619,45 +1632,78 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
                         prev_ids_tensor = ids_tensor;
                     }
+                    // copy a single expert, optionally going through the expert
+                    // cache hook (FATE) for faster cached transfers
+                    auto copy_one_expert = [&](int32_t eid) {
+                        const size_t expert_offset = eid * expert_size;
+                        const size_t padding = std::min<size_t>(expert_size, 512);
+                        const size_t padding_end = eid < n_expert - 1 ? padding : 0;
+                        const size_t copy_size = expert_size + padding_end;
+
+                        if (sched->expert_hook &&
+                            sched->expert_hook(
+                                sched->expert_hook_user_data,
+                                split_backend, input_cpy,
+                                (const uint8_t *)input->data + expert_offset,
+                                expert_offset, copy_size,
+                                (int32_t)eid, n_expert,
+                                input->name)) {
+                            return; // hook handled the copy
+                        }
+
+                        ggml_backend_tensor_set_async(split_backend,
+                            input_cpy,
+                            (const uint8_t *)input->data + expert_offset, expert_offset,
+                            copy_size);
+                    };
 
                     // group consecutive experts and copy them together
-                    auto copy_experts = [&](int32_t first_id, int32_t last_id) {
+                    // (batched path when no expert hook is set)
+                    auto copy_experts_batch = [&](int32_t first_id, int32_t last_id) {
                         const size_t expert_offset = first_id * expert_size;
-                        const size_t expert_size_copy =  (last_id - first_id + 1) * expert_size;
+                        const size_t expert_size_copy = (last_id - first_id + 1) * expert_size;
                         const size_t padding = std::min<size_t>(expert_size, 512);
                         const size_t padding_end = last_id < n_expert - 1 ? padding : 0;
 
                         ggml_backend_tensor_set_async(split_backend,
                             input_cpy,
                             (const uint8_t *)input->data + expert_offset, expert_offset,
-                            // copy a bit extra at the to ensure there are no NaNs in the padding of the last expert
-                            // this is necessary for MMQ in the CUDA backend
                             expert_size_copy + padding_end);
                     };
 
-                    int id = 0;
-                    while (!ggml_bitset_get(used_ids.data(), id)) {
-                        id++;
-                    }
-                    int32_t first_id = id;
-                    int32_t last_id = first_id;
-
-                    for (++id; id < n_expert; ++id) {
-                        if (!ggml_bitset_get(used_ids.data(), id)) {
-                            continue;
+                    if (sched->expert_hook) {
+                        // per-expert path with cache hook
+                        for (int id = 0; id < n_expert; ++id) {
+                            if (ggml_bitset_get(used_ids.data(), id)) {
+                                copy_one_expert(id);
+                            }
                         }
+                    } else {
+                        // original batched path (no hook)
+                        int id = 0;
+                        while (!ggml_bitset_get(used_ids.data(), id)) {
+                            id++;
+                        }
+                        int32_t first_id = id;
+                        int32_t last_id = first_id;
 
-                        if (id == last_id + 1) {
+                        for (++id; id < n_expert; ++id) {
+                            if (!ggml_bitset_get(used_ids.data(), id)) {
+                                continue;
+                            }
+
+                            if (id == last_id + 1) {
+                                last_id = id;
+                                continue;
+                            }
+
+                            copy_experts_batch(first_id, last_id);
+
+                            first_id = id;
                             last_id = id;
-                            continue;
                         }
-
-                        copy_experts(first_id, last_id);
-
-                        first_id = id;
-                        last_id = id;
+                        copy_experts_batch(first_id, last_id);
                     }
-                    copy_experts(first_id, last_id);
                 } else {
                     // try async copy, but if not possible, we can still use a sync copy without synchronizing the dst backend, since we handle the synchronization here with multiple copies and events
                     // TODO: add public function to facilitate this, since applications do not have direct access to the backend interface
@@ -1918,6 +1964,12 @@ void ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backe
     GGML_ASSERT(sched);
     sched->callback_eval = callback;
     sched->callback_eval_user_data = user_data;
+}
+
+void ggml_backend_sched_set_expert_hook(ggml_backend_sched_t sched, ggml_backend_sched_expert_hook_fn fn, void * user_data) {
+    GGML_ASSERT(sched);
+    sched->expert_hook = fn;
+    sched->expert_hook_user_data = user_data;
 }
 
 int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {
