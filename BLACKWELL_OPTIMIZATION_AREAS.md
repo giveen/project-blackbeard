@@ -354,7 +354,7 @@
 | `lna-lab/blackwell-geforce-nvfp4-gemm` | SM120 attention/gemm patches | Attention/gemm patches |
 | `TheTom/llama-cpp-turboquant` | Extended TurboQuant + MTP/GGUF serving path | TurboQuant quality/serving |
 
-|---
+---
 
 ## 11. Far-Fringe / Blue-Sky Ideas
 
@@ -368,7 +368,7 @@ These are intentionally outside the immediate roadmap. They are included because
 #### 11b. Wrapper Fan-Overclock + Power-Curve Management for Sustained SM120 Kernel Runtime
 - **What**: Use `nvidia-smi` + `nvidia-smi -pm 1` + custom fan curve + MTBF-tuned power limit to keep RTX 5090 at maximum sustained boost under kernel-bound rather than burst workloads.
 - **Why it might win**: Short benchmarks hit boost clocks. Long multi-turn decode runs frequently hit thermal throttle.
-- **Evidence**: public 5090/RP 6000 reports show non-trivial throttling behavior under inference; undervolting sometimes improves sustained tok/s.
+- **Evidence**: public 5090 / RTX PRO 6000 reports show non-trivial throttling behavior under inference; undervolting sometimes improves sustained tok/s.
 - **Caveat**: This is a host-tuning play, not a kernel change.
 
 #### 11c. DFlash / Speculative Prefill Ported to GGUF Kernel Space
@@ -378,7 +378,7 @@ These are intentionally outside the immediate roadmap. They are included because
 - **Reference**: `Luce-Org/lucebox`, `jiewuxue/luce-megakernel/dflash`.
 
 #### 11d. Automatic SM120 Tile Smoke Tests at Build Time
-- **What**: Compile-time `static_assert` style checks for FA tile shapes against 99 KB SMEM.
+- **What**: Compile-time `static_assert`-style checks for FA tile shapes against 99 KB SMEM.
 - **Why it might win**: SM120 regression classes are easy to ship accidentally when upstream changes defaults.
 - **Status**: Not implemented. Low risk, pure diagnostic value.
 - **Reference**: Existing `fattn-tile.cuh` compile-time table shape logic.
@@ -400,26 +400,27 @@ These are intentionally outside the immediate roadmap. They are included because
 
 #### 11h. OS-Level Inference Priority Class for SM120
 - **What**: Use `chrt`, `nice`, and cgroup-based CPU isolation so that inference-critical threads are not preempted by desktop compositors or background I/O.
-- **Why it might win**: Even with perfect kernels, tok/s can vary by 5-15% when the OS steals cycles under desktop workloads.
+- **Why it might win**: Even with perfect kernels, tok/s can vary by 5-15 % when the OS steals cycles under desktop workloads.
 - **Reference**: public `blackwell-linux-infra-optimizer` package; general Linux real-time scheduling guidance.
 
 ---
 
 ## 12. Research / Benchmark Sources To Mine Next
 
-These are not yet mined for Blackbeard-specificizable content. They may contain additional SM120 recipes, kernel patches, or benchmark numbers.
+These are not yet mined for Blackbeard-specificizable content. They may contain additional SM120 recipes, kernel patches, benchmark numbers, or operational recipes.
 
-- `elsung/blackwell-llm-toolkit` — SM120-verified recipes/configs for llama.cpp/vLLM/TensorRT-LLM/LMCache, validated on RTX PRO 6000.
-- `local-inference-lab/rtx6kpro` — RTX 6000 Pro wiki: BF16 KV mandatory on SM120 for GLM-5, SGLang-backed sparse MLA decode recipes, NVFP4 notes.
-- `tlskinner26/llama-cpp-blackwell-optimization` — CMake `CMAKE_CUDA_ARCHITECTURES=120a-real`, Gemma 4 26B on 16 GB experiments.
-- `informatico-madrid/blackwell-linux-infra-optimizer` — Linux kernel 6.14 + vLLM SM120 attempt, flash-attn symbol fixes, 58.6 t/s DeepSeek-R1-32B-AWQ.
-- `Andgihat/llama-cpp-mtp-turboquant-sm120-blackwell-windows` — Windows prebuilt combining MTP + TurboQuant + `sm_120`; useful build-flag cross-check.
-- `flashrt-project/FlashRT` — SM120 quantization-alignment discussion for NVFP4 attention.
-- `Luce-Org/lucebox` + `jiewuxue/luce-megakernel` — Megakernel + DFlash speculative decode, Blackwell `sm_120` path, 194 tok/s NVFP4 decode on GB10.
-- `ggml-org/llama.cpp` discussion #20969 — canonical TurboQuant discussion thread with CLI/type integration spec.
-- `Dao-AILab/flash-attention` issue #1665 — SM120 usability discussion.
-- SGLang issue #19637 — SM120 performance optimization plan.
-- `0xSero/blackwell-gpu-wiki` — dedicated SM120 knowledge base.
+- `AtomicBot-ai/atomic-llama-cpp-turboquant` - Fused `TurboFlash` attention for `turbo3` KV cache; claimed 82 + tok/s at 200K context on 4090. SM120 port would need validation for Blackwell shared-memory constraints.
+- `Indras-Mirror/llama.cpp-turboq-mtp` - Explicitly labeled "Fused TBQ4 Flash Attention + MTP" llama.cpp fork. Core concepts may be portable to Blackbeard `tq` branch.
+- `wildcardorbit/epic-ark-llm` - Focused on Blackbeard optimization with SM120 runtime optimizations and performance enhancements. This is exactly the class of repo worth inspecting for model/Runtime optimizations.
+- `rogerhamonassistant-ai/vllm-moet` / `Eaven/vllm-moet` - Frontier MoE on RTX PRO 6000 / RTX 5090 with hand-written SM120 SASS. Is vLLM only, but represents a local proof that consumer Blackwell can load the absolute largest MoE checkpoints.
+- `qu0b/vllm-dsv4-sm120` + `jasl/vllm-ds4-sm120-harness` - DeepSeek-V4-Flash on SM120 without datacenter Blackwell features; worthwhile to inspect sparse-MLA/MLP alignment techniques.
+- `Andgihat/llama-cpp-mtp-turboquant-sm120-blackwell-windows` - Windows prebuilt combining MTP + TurboQuant + native `sm_120`; useful build-flag cross-check.
+- `tlskinner26/llama-cpp-blackwell-optimization` - CMake `CMAKE_CUDA_ARCHITECTURES=120a-real`, Gemma 4 26B on 16 GB, FP4 tensor-core discovery; useful build/config cross-check.
+- `informatico-madrid/blackwell-linux-infra-optimizer` - Linux kernel 6.14 + vLLM SM120 recipe, flash-attn symbol fixes, 58.6 t/s DeepSeek-R1-32B-AWQ.
+- `local-inference-lab/rtx6kpro` - RTX 6000 Pro wiki: BF16 KV mandatory on SM120 for GLM-5, SGLang + FlashInfer sparse MLA decode recipes, NVFP4 notes.
+- `Luce-Org/lucebox` + `jiewuxue/luce-megakernel` - Megakernel + DFlash speculative decode, Blackwell `sm_120` path, 194 tok/s NVFP4 decode on GB10.
+- `0xSero/blackwell-gpu-wiki` - dedicated SM120 knowledge base.
+- `gau-nernst/fa-5090`, `florianmattana/fp4-fused-attention-sm120`, `lna-lab/blackwell-geforce-nvfp4-gemm` - architectural context for SM120 tile sizing and accumulator placement.
 
 ---
 
@@ -434,18 +435,30 @@ These are not yet mined for Blackbeard-specificizable content. They may contain 
 | `atcuality2021/manthanquant` | WHT-space FA, Lloyd-Max centroids | TBQ verification |
 | `DrBearJew/dot4-flash-attention` | INT8 packed16, split-K, RDNA3 | AMD-only but concepts general |
 | `gau-nernst/fa-5090` | SM120 FA CUDA writeup | SM120 tile tuning intuition |
-| `florianmattana/fp4-fused-attention-sm120` | SM120 FP4 attention + SMEM/budget notes | SM120 accumulator/smem behavior |
+| `florianmattana/fp4-fused-attention-sm120` | SM120 FP4 attention + SMEM/budget notes | Accumulator/smem behavior |
 | `0xSero/blackwell-gpu-wiki` | SM120 vs SM100 summary, SMEM budget page | Quick architecture reference |
 | `lna-lab/blackwell-geforce-nvfp4-gemm` | RTX 5090/5080/5070Ti/RTX PRO 6000 patches for vLLM/FlashInfer/CUTLASS | SM120-specific attention/gemm patches |
 | `TheTom/llama-cpp-turboquant` | Extended TurboQuant + MTP/GGUF serving path | Cross-check TurboQuant quality/serving |
 | `vLLM docs/blog` | FP8 KV cache, per-head calibration docs | Public KV calibrations ecosystem |
 | `tlskinner26/llama-cpp-blackwell-optimization` | CMake `120a-real` autodetect, Gemma 4 26B on 16 GB, FP4 tensor-core discovery | SM120 build/packaging recipe |
-| `elsung/blackwell-llm-toolkit` | SM120-verified recipes/configs for llama.cpp/vLLM/TensorRT-LLM/LMCache | General SM120 deployment playbook |
-| `local-inference-lab/rtx6kpro` | RTX 6000 Pro wiki: BF16 KV mandatory for GLM-5, sparse MLA decode, NVFP4 notes | SM120 backend gotchas |
-| `informatico-madrid/blackwell-linux-infra-optimizer` | Linux kernel 6.14 + vLLM SM120 recipe, flash-attn symbol fixes | Host/software stack hygiene |
+| `elsung/blackwell-llm-toolkit` | SM120-verified recipes/configs for llama.cpp/vLLM/TensorRT-LLM/LMCache, RTX PRO 6000 baseline | General SM120 deployment playbook |
+| `local-inference-lab/rtx6kpro` | RTX 6000 Pro wiki for SM120: BF16 KV mandatory for GLM-5, SGLang + FlashInfer sparse MLA decode, NVFP4 notes | SM120 backend gotchas |
+| `informatico-madrid/blackwell-linux-infra-optimizer` | Linux kernel 6.14 + vLLM SM120 recipe, flash-attn symbol fixes, 58.6 t/s DeepSeek-R1-32B-AWQ | Host/software stack hygiene |
 | `flashrt-project/FlashRT` | SM120 quantization-alignment discussion for NVFP4 inference | Kernel porting notes |
-| `Andgihat/llama-cpp-mtp-turboquant-sm120-blackwell-windows` | Windows prebuilt combining MTP + TurboQuant + native `sm_120` | Build-flag cross-check |
-| `Luce-Org/lucebox` | Megakernel + speculative decode, Blackwell `sm_120` path | Fused speculative decode concepts |
+| `Andgihat/llama-cpp-mtp-turboquant-sm120-blackwell-windows` | Windows prebuilt combining MTP + TurboQuant + native `sm_120` for RTX 50-series | Build-flag cross-check |
+| `Luce-Org/lucebox` | Megakernel + DFlash speculative decoding, Blackwell `sm_120` path, 194 tok/s NVFP4 decode on GB10 | Fused speculative decode concepts |
+| `AtomicBot-ai/atomic-llama-cpp-turboquant` | Fused `TurboFlash` FA + MTP for llama.cpp | TurboQuant attention integration |
+| `Indras-Mirror/llama.cpp-turboq-mtp` | Fused TBQ4 Flash Attention + MTP llama.cpp fork | TBQ4 FA integration concepts |
+| `wildcardorbit/epic-ark-llm` | Blackbeard runtime optimizations and SM120 performance enhancements | Exact-target comparisons |
+| `Eaven/vllm-moet` / `rogerhamonassistant-ai/vllm-moet` | Frontier MoE on RTX PRO 6000 / RTX 5090 with SM120 SASS | MoE shape/scale on consumer Blackwell |
+| `qu0b/vllm-dsv4-sm120` | DeepSeek-V4-Flash on SM120 vLLM | KV/MLA/FP4 SM120 patterns |
+| `jasl/vllm-ds4-sm120-harness` | SM120 FlashInfer + adapter evidence | SM120 sparse-MLA adapter cues |
+| `local-inference-lab/blackwell-llm-docker` | Dockerboards with source-built FlashInfer + PR2913 for SM120 | Deployment/kernel source cues |
+| `ggml-org/llama.cpp` discussion #20969 | Canonical TurboQuant discussion thread with CLI/type integration spec | TurboQuant integration spec |
+| `ggml-org/llama.cpp` issue #23693 | RTX 5060 Ti `sm_120` `BLACKWELL_NATIVE_FP4=1` kernel/attention failure case | Consumer Blackwell failure modes |
+| `Dao-AILab/flash-attention` issue #1665 | SM120 usability discussion | SM120 porting lessons |
+| SGLang issue #19637 | SM120 performance optimization plan | SM120 optimization roadmap |
+| `sorryhyunblog.vercel.app` | FlashAttention-4 SM120 implementation notes from RTX 5060 Ti (`sm_120`) | Consumer SM120 FA4 lessons |
 
 ---
 
@@ -460,3 +473,13 @@ For every optimization candidate in this document, the empirical proof must incl
 5. memory-bound percentage estimate from occupancy/warp state profiler
 
 Any optimization that cannot satisfy this packet is not "done", no matter how elegant the patch.
+
+## 15. Research Loop Notes (remove once exhausted)
+
+This section documents active/ongoing search themes so searches are not needlessly repeated:
+
+- FlashAttention-4 SM120 consumer ports: `sorryhyunblog`, GitHub forks, and alternative `sm_120` FA4 attempts.
+- llama.cpp forks combining MTP + TurboQuant + Blackwell: multiple repos found in 2026; evaluate kerneling/merge opportunities.
+- Frontier MoE on SM120: `vllm-moet`/`vllm-dsv4-sm120` show that DeepSeek-V4/GLM-5-class models can run on consumer Blackwell with significant external patching; useful pattern database, not a local merge target.
+- Local inference Google/Jax/OSS: `wildcardorbit/epic-ark-llm` has explicit Blackbeard focus; validate before mining.
+- SM120 Docker/infra recipes: `blackwell-llm-docker` and `blackwell-linux-infra-optimizer` both emphasize host stack and kernel/runtime prerequisites for stable SM120 inference.
