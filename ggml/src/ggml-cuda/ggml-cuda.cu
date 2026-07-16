@@ -5287,6 +5287,14 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
 // ---------------------------------------------------------------------------
 extern "C" {
 
+// D2D copy within the same device (for FATE cache hits)
+void fate_prefetch_d2d(void * backend_ptr, void * dst, const void * src, size_t n) {
+    if (!backend_ptr || !dst || !src || n == 0) return;
+    ggml_backend_cuda_context * ctx =
+        (ggml_backend_cuda_context *)((ggml_backend_t)backend_ptr)->context;
+    CUDA_CHECK(cudaMemcpyAsync(dst, src, n, cudaMemcpyDeviceToDevice, ctx->stream()));
+}
+
 void * fate_prefetch_stream_create(void) {
     cudaStream_t s = nullptr;
     cudaError_t err = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
