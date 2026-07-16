@@ -34,14 +34,16 @@
 - **Applicable GPUs**: All. Critical for 128K+ context on any GPU, especially memory-bound decode on 5090's HBM.
 
 #### 1c. Tile Size Auto-Tuning for 99 KB SMEM
-- **What**: The TILE and MMA kernels use fixed tile sizes inherited from upstream. SM120's 99 KB SMEM means:
-  - Smaller Q-tiles or fewer pipeline stages fit.
-  - Accumulator register pressure is the practical limit, not just raw SMEM bytes.
-  - Need to re-derive optimal tile sizes for D=64/128/256/512 on SM120.
-- **Status**: Untuned. Inherits upstream defaults designed for larger SMEM.
-- **Difficulty**: Low. Parameter sweep in `fattn.cuh`. Config tables exist in `fattn-tile.cuh` as compile-time CASE rows.
-- **Applicable GPUs**: SM120-specific. Critical tuning knob.
-- **Evidence**: `tasks/tile` config table already enumerates D=512/ncols combos, but without SM120 validation. Primary public SM120 kernel efforts also converge on smaller tiles.
+- **What**: The TILE and MMA kernels use fixed tile sizes inherited from upstream. SM120's 99 KB SMEM means smaller Q-tiles or fewer pipeline stages fit; need to re-derive optimal tile sizes for D=64/128/256/512 on SM120.
+- **Status**: **Empirically tested 2026-07-15 on RTX 5090 (Gemma 4 26B, D=512).**
+  - Added `ggml_cuda_fattn_mma_get_config_sm120()` — SM120-specific MMA config table wired into both host and device dispatch.
+  - **D=512: no measurable win (within ±2% noise).** Ampere defaults already use `nstages=1, nbatch_fa=32` — the most conservative settings. No SMEM pressure to relieve.
+  - **D=32–128: likely wins exist but untested.** Ampere defaults use `nstages=2, nbatch_fa=128, nthreads=128` — likely exceed 99 KB. No D=128 model was available to validate.
+  - **Template hazard:** `nbatch_fa` appears in `constexpr` array-size contexts in `fattn-mma-f16.cuh`. Changing it can break template instantiations for certain (DKQ, DV, ncols1, ncols2) tuples. Config changes must be validated against every compiled template instance.
+  - **Current state:** SM120 config function exists and dispatches correctly, but aliases to Ampere (no-op) because (a) D=512 showed no gain, (b) D=128 couldn't be tested, (c) the constexpr hazard needs per-template validation.
+- **Difficulty**: Low once safe values identified. One function in `fattn-mma-f16.cuh`, drop-in.
+- **Applicable GPUs**: SM120-specific.
+- **Next action**: Test with a D=128 model (e.g. Qwen2.5-7B, Llama 3.2-3B, or Gemma 4 12B) to see if smaller tiles help on SM120.
 
 #### 1d. Warp Specialization (without wgmma)
 - **What**: Split warp groups into orchestrator (issue loads/mma) and compute (softmax). Can be done with `mma.sync` + `cp.async`, though less effective than with TMA.
@@ -339,23 +341,122 @@
 | `lna-lab/blackwell-geforce-nvfp4-gemm` | RTX 5090/5080/5070Ti/RTX PRO 6000 patches for vLLM/FlashInfer/CUTLASS | SM120-specific attention/gemm patches |
 | `TheTom/llama-cpp-turboquant` | Extended TurboQuant + MTP/GGUF serving path | Cross-check TurboQuant quality/serving |
 | `vLLM docs/blog` | FP8 KV cache, per-head calibration docs | Public KV calibrations ecosystem |
+| `tlskinner26/llama-cpp-blackwell-optimization` | CMake `120a-real` autodetect, Gemma 4 26B on 16 GB, FP4 tensor-core discovery | SM120 build/packaging recipe |
+| `elsung/blackwell-llm-toolkit` | SM120-verified recipes/configs for llama.cpp/vLLM/TensorRT-LLM/LMCache, RTX PRO 6000 baseline | General SM120 deployment playbook |
+| `local-inference-lab/rtx6kpro` | RTX 6000 Pro wiki for SM120: BF16 KV mandatory for GLM-5, SGLang + FlashInfer sparse MLA decode, NVFP4 notes | SM120 backend gotchas |
+| `informatico-madrid/blackwell-linux-infra-optimizer` | Linux kernel 6.14 + vLLM SM120 recipe, flash-attn symbol fixes, 58.6 t/s DeepSeek-R1-32B-AWQ | Host/software stack hygiene |
+| `flashrt-project/FlashRT` | SM120 quantization-alignment discussion for NVFP4 inference | Kernel porting notes |
+| `Andgihat/llama-cpp-mtp-turboquant-sm120-blackwell-windows` | Windows prebuilt combining MTP + TurboQuant + native `sm_120` for RTX 50-series | Build-flag cross-check |
+| `Luce-Org/lucebox` | Megakernel + DFlash speculative decoding, Blackwell `sm_120` path, 194 tok/s NVFP4 decode on GB10 | Fused speculative decode concepts |
+| `gau-nernst/fa-5090` | SM120 FA writeup | Tile tuning intuition |
+| `florianmattana/fp4-fused-attention-sm120` | SM120 SMEM/budget notes | Accumulator/smem behavior |
+| `0xSero/blackwell-gpu-wiki` | SM120 vs SM100 summary | Architecture reference |
+| `lna-lab/blackwell-geforce-nvfp4-gemm` | SM120 attention/gemm patches | Attention/gemm patches |
+| `TheTom/llama-cpp-turboquant` | Extended TurboQuant + MTP/GGUF serving path | TurboQuant quality/serving |
+
+|---
+
+## 11. Far-Fringe / Blue-Sky Ideas
+
+These are intentionally outside the immediate roadmap. They are included because one of them could become a unlock after additional research.
+
+#### 11a. Persistent KV Replay via Memory-Mapped / io_uring Backing
+- **What**: Treat KV blocks as a custom persistent object store backed by `mmap()` or `io_uring` with lifecycle longer than any single request.
+- **Why it might win**: Multi-turn agents reuse long prefixes. Linux already does the hard work of page cache promotion. The kernel path for hugepage-aligned sequential prefetch is already well-tuned.
+- **Risk**: Cache invalidation when quantization, model version, or MTP draft model changes. Needs unique fingerprinting per (model, quant, prefix hash).
+
+#### 11b. Wrapper Fan-Overclock + Power-Curve Management for Sustained SM120 Kernel Runtime
+- **What**: Use `nvidia-smi` + `nvidia-smi -pm 1` + custom fan curve + MTBF-tuned power limit to keep RTX 5090 at maximum sustained boost under kernel-bound rather than burst workloads.
+- **Why it might win**: Short benchmarks hit boost clocks. Long multi-turn decode runs frequently hit thermal throttle.
+- **Evidence**: public 5090/RP 6000 reports show non-trivial throttling behavior under inference; undervolting sometimes improves sustained tok/s.
+- **Caveat**: This is a host-tuning play, not a kernel change.
+
+#### 11c. DFlash / Speculative Prefill Ported to GGUF Kernel Space
+- **What**: Lucebox-style DFlash/tree-based speculative decoding or speculative prefill inside llama.cpp's graph rather than through Python backends.
+- **Why it might win**: Public DFlash paths already outperform plain MTP on similar hardware. Fusing it into GGUF exposes it to users who do not want vLLM/SGLang.
+- **Risk**: Significant graph/backend work.
+- **Reference**: `Luce-Org/lucebox`, `jiewuxue/luce-megakernel/dflash`.
+
+#### 11d. Automatic SM120 Tile Smoke Tests at Build Time
+- **What**: Compile-time `static_assert` style checks for FA tile shapes against 99 KB SMEM.
+- **Why it might win**: SM120 regression classes are easy to ship accidentally when upstream changes defaults.
+- **Status**: Not implemented. Low risk, pure diagnostic value.
+- **Reference**: Existing `fattn-tile.cuh` compile-time table shape logic.
+
+#### 11e. SM120-Aware MTP Draft-Model Selection Heuristic
+- **What**: Auto-choose draft-model size/batch based on SM120's tile/occupancy tradeoffs rather than letting the user guess.
+- **Why it might win**: Largest draft model is not always fastest, especially on memory-constrained consumer Blackwell.
+- **Reference**: upstream llama.cpp `--spec-type mtp`; public MTP benchmarks show hardware-dependent sweet spots.
+
+#### 11f. Long-Context Kernel Autotuning by Sequence-Length Bucket
+- **What**: Pre-select decode kernel variant based on context-length bucket rather than only head/dtype. Long contexts change memory access patterns more than model shape does.
+- **Why it might win**: SM120 is especially bandwidth-sensitive; short and long contexts should use different tile/prefetch configs.
+- **Evidence**: public SM120 work shows SMEM pressure as a function of sequence length, not just model width.
+
+#### 11g. Zero-Copy Multi-Process Server Model for Long-Lived Chat Sessions
+- **What**: Use one pinned KV region per user, mapped read-only into decoder worker processes. Zero-copy handoff between prompt processor and decode loop via POSIX shared memory.
+- **Why it might win**: Removes redundant copies between server components; longest-user reuse becomes almost free.
+- **Evidence**: vLLM/SGLang prefix-cache literature shows most server-side wins come from cache reuse, not kernel FLOPS.
+
+#### 11h. OS-Level Inference Priority Class for SM120
+- **What**: Use `chrt`, `nice`, and cgroup-based CPU isolation so that inference-critical threads are not preempted by desktop compositors or background I/O.
+- **Why it might win**: Even with perfect kernels, tok/s can vary by 5-15% when the OS steals cycles under desktop workloads.
+- **Reference**: public `blackwell-linux-infra-optimizer` package; general Linux real-time scheduling guidance.
 
 ---
 
-## Priority Recommendations
+## 12. Research / Benchmark Sources To Mine Next
 
-**Tier 1 (High Impact, Low-Medium Effort):**
-1. **TURBO kernel inner loop** — pack 128-bit K/V loads in `fattn-turbo.cuh` (2a)
-2. **Tile size tuning for 99 KB SMEM** — parameter sweep, especially D=512 (1c + 1f)
-3. **Split-KV decode** — long-context decode boost (1b)
+These are not yet mined for Blackbeard-specificizable content. They may contain additional SM120 recipes, kernel patches, or benchmark numbers.
 
-**Tier 2 (High Impact, Medium Effort):**
-4. **Hadamard K/V-cache** — generic quality boost for existing quant types (2b)
-5. **CP_ASYNC prefetch sizing for SM120** — better decode bandwidth utilization (5c/5e)
-6. **Low-perplexity Q4_0 KV** — better Q4_0 cache quality (2d)
+- `elsung/blackwell-llm-toolkit` — SM120-verified recipes/configs for llama.cpp/vLLM/TensorRT-LLM/LMCache, validated on RTX PRO 6000.
+- `local-inference-lab/rtx6kpro` — RTX 6000 Pro wiki: BF16 KV mandatory on SM120 for GLM-5, SGLang-backed sparse MLA decode recipes, NVFP4 notes.
+- `tlskinner26/llama-cpp-blackwell-optimization` — CMake `CMAKE_CUDA_ARCHITECTURES=120a-real`, Gemma 4 26B on 16 GB experiments.
+- `informatico-madrid/blackwell-linux-infra-optimizer` — Linux kernel 6.14 + vLLM SM120 attempt, flash-attn symbol fixes, 58.6 t/s DeepSeek-R1-32B-AWQ.
+- `Andgihat/llama-cpp-mtp-turboquant-sm120-blackwell-windows` — Windows prebuilt combining MTP + TurboQuant + `sm_120`; useful build-flag cross-check.
+- `flashrt-project/FlashRT` — SM120 quantization-alignment discussion for NVFP4 attention.
+- `Luce-Org/lucebox` + `jiewuxue/luce-megakernel` — Megakernel + DFlash speculative decode, Blackwell `sm_120` path, 194 tok/s NVFP4 decode on GB10.
+- `ggml-org/llama.cpp` discussion #20969 — canonical TurboQuant discussion thread with CLI/type integration spec.
+- `Dao-AILab/flash-attention` issue #1665 — SM120 usability discussion.
+- SGLang issue #19637 — SM120 performance optimization plan.
+- `0xSero/blackwell-gpu-wiki` — dedicated SM120 knowledge base.
 
-**Tier 3 (Research / Long-Term):**
-7. **INT2 / OSCAR-class KV + dedicated FA** — offline rotation + 2-bit cache (2e/2f)
-8. **V-GMEM transpose for V cache** — long-context coalescing win if paged cache lands (5b)
-9. **WHT-space fused attention** — ManthanQuant cleanup path if WHT-based cache evolves (2g)
-10. **IQK/Trellis quants** — new weight quant types for future accuracy/performance frontier (3b/3c)
+---
+
+## 13. Repositories and Sources
+
+| Repo | Key Content | Relevance |
+|---|---|---|
+| `/mnt/storage/blackbeard` (tq branch) | TBQ/TURBO KV cache types | KV cache compression |
+| `/mnt/storage/Projects/turboquant` | TheTom's optimizations | oscar2 INT2 FA, learned rotations |
+| `ikawrakow/ik_llama.cpp` | Hadamard KV, IQK/Trellis quants, fused MoE | General-purpose quant/performance improvements |
+| `Dao-AILab/flash-attention` (cute/) | FA4: SM100 tcgen05, SM120 SM80 fallback | Reference architecture |
+| `atcuality2021/manthanquant` | WHT-space FA, Lloyd-Max centroids | TBQ verification |
+| `DrBearJew/dot4-flash-attention` | INT8 packed16, split-K, RDNA3 | AMD-only but concepts general |
+| `gau-nernst/fa-5090` | SM120 FA CUDA writeup | SM120 tile tuning intuition |
+| `florianmattana/fp4-fused-attention-sm120` | SM120 FP4 attention + SMEM/budget notes | SM120 accumulator/smem behavior |
+| `0xSero/blackwell-gpu-wiki` | SM120 vs SM100 summary, SMEM budget page | Quick architecture reference |
+| `lna-lab/blackwell-geforce-nvfp4-gemm` | RTX 5090/5080/5070Ti/RTX PRO 6000 patches for vLLM/FlashInfer/CUTLASS | SM120-specific attention/gemm patches |
+| `TheTom/llama-cpp-turboquant` | Extended TurboQuant + MTP/GGUF serving path | Cross-check TurboQuant quality/serving |
+| `vLLM docs/blog` | FP8 KV cache, per-head calibration docs | Public KV calibrations ecosystem |
+| `tlskinner26/llama-cpp-blackwell-optimization` | CMake `120a-real` autodetect, Gemma 4 26B on 16 GB, FP4 tensor-core discovery | SM120 build/packaging recipe |
+| `elsung/blackwell-llm-toolkit` | SM120-verified recipes/configs for llama.cpp/vLLM/TensorRT-LLM/LMCache | General SM120 deployment playbook |
+| `local-inference-lab/rtx6kpro` | RTX 6000 Pro wiki: BF16 KV mandatory for GLM-5, sparse MLA decode, NVFP4 notes | SM120 backend gotchas |
+| `informatico-madrid/blackwell-linux-infra-optimizer` | Linux kernel 6.14 + vLLM SM120 recipe, flash-attn symbol fixes | Host/software stack hygiene |
+| `flashrt-project/FlashRT` | SM120 quantization-alignment discussion for NVFP4 inference | Kernel porting notes |
+| `Andgihat/llama-cpp-mtp-turboquant-sm120-blackwell-windows` | Windows prebuilt combining MTP + TurboQuant + native `sm_120` | Build-flag cross-check |
+| `Luce-Org/lucebox` | Megakernel + speculative decode, Blackwell `sm_120` path | Fused speculative decode concepts |
+
+---
+
+## 14. Benchmarks to Capture Before Claiming Wins
+
+For every optimization candidate in this document, the empirical proof must include:
+
+1. tokens-per-second decode at bs=1, 6 prompt/128 output, or equivalent consistent harness
+2. VRAM usage at target context length
+3. SM120-specific capture from `ncu`/`nvprof`: SMEM usage per block, register pressure, replay overhead
+4. comparative result at D=512, since local baseline already boarded this shape
+5. memory-bound percentage estimate from occupancy/warp state profiler
+
+Any optimization that cannot satisfy this packet is not "done", no matter how elegant the patch.
