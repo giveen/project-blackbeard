@@ -5282,4 +5282,75 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
     return cuda_backend;
 }
 
+// ---------------------------------------------------------------------------
+// FATE prefetch — separate CUDA stream for async expert prefetching
+// ---------------------------------------------------------------------------
+extern "C" {
+
+void * fate_prefetch_stream_create(void) {
+    cudaStream_t s = nullptr;
+    cudaError_t err = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+    if (err != cudaSuccess) return nullptr;
+    return (void *)s;
+}
+
+void fate_prefetch_h2d(void * stream, void * dst, const void * src, size_t n) {
+    if (!stream || !dst || !src || n == 0) return;
+    cudaMemcpyAsync(dst, src, n, cudaMemcpyDefault, (cudaStream_t)stream);
+}
+
+void fate_prefetch_sync(void * stream) {
+    if (!stream) return;
+    cudaStreamSynchronize((cudaStream_t)stream);
+}
+
+void fate_prefetch_stream_destroy(void * stream) {
+    if (!stream) return;
+    cudaStreamDestroy((cudaStream_t)stream);
+}
+
+static cudaEvent_t g_fate_barrier_event = nullptr;
+
+// Make backend's main CUDA stream wait for the prefetch stream (GPU-side only)
+void fate_prefetch_insert_barrier(void * backend_ptr, void * prefetch_stream) {
+    if (!backend_ptr || !prefetch_stream) return;
+    if (!g_fate_barrier_event) {
+        cudaEventCreateWithFlags(&g_fate_barrier_event, cudaEventDisableTiming);
+    }
+    ggml_backend_cuda_context * ctx =
+        (ggml_backend_cuda_context *)((ggml_backend_t)backend_ptr)->context;
+    cudaEventRecord(g_fate_barrier_event, (cudaStream_t)prefetch_stream);
+    cudaStreamWaitEvent(ctx->stream(), g_fate_barrier_event, 0);
+}
+
+// Pin host memory so cudaMemcpyAsync is truly non-blocking.
+bool fate_prefetch_pin_memory(const void * ptr, size_t size) {
+    if (!ptr || size == 0) return false;
+    const size_t page_size = 4096;
+    uintptr_t start = (uintptr_t)ptr;
+    uintptr_t aligned_start = start & ~(page_size - 1);
+    size_t aligned_size = (start + size - aligned_start + page_size - 1) & ~(page_size - 1);
+    const unsigned int flags[] = { cudaHostRegisterDefault, cudaHostRegisterPortable, cudaHostRegisterMapped };
+    for (auto f : flags) {
+        cudaError_t err = cudaHostRegister((void *)aligned_start, aligned_size, f);
+        if (err == cudaSuccess) return true;
+        cudaGetLastError();
+    }
+    return false;
+}
+
+// Allocate a pinned staging buffer
+void * fate_prefetch_alloc_pinned(size_t size) {
+    void * p = nullptr;
+    cudaError_t err = cudaMallocHost(&p, size);
+    if (err != cudaSuccess) { cudaGetLastError(); return nullptr; }
+    return p;
+}
+
+void fate_prefetch_free_pinned(void * p) {
+    if (p) cudaFreeHost(p);
+}
+
+} // extern "C"
+
 GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)
