@@ -1032,6 +1032,10 @@ extern "C" {
     // and is not necessary to call it explicitly in most cases
     LLAMA_API void llama_synchronize(struct llama_context * ctx);
 
+    // FATE: Fast Expert Caching for MoE offloading
+    LLAMA_API bool llama_fate_init(struct llama_context * ctx, int32_t cache_mb);
+    LLAMA_API void llama_fate_print_stats(void);
+
     // Token logits obtained from the last call to llama_decode()
     // The logits for which llama_batch.logits[i] != 0 are stored contiguously
     // in the order they have appeared in the batch.

@@ -1316,6 +1316,11 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     }
 
     pimpl->context.reset(lctx);
+
+    // Initialize FATE expert cache if requested
+    if (params.fate) {
+        llama_fate_init(lctx, params.fate_cache_mb);
+    }
 }
 
 llama_model * common_init_result::model() {

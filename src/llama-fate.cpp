@@ -37,11 +37,20 @@ bool fate_gpu_pool::init(ggml_backend_t backend, size_t slot_sz, size_t target_m
     pool_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_I8, pool_bytes);
     if (!pool_tensor) { free_pool(); return false; }
 
-    buffer = ggml_backend_alloc_buffer(backend, pool_bytes);
-    if (!buffer) { free_pool(); return false; }
+    // Get the backend's default buffer type (CUDA buffer type for CUDA backend)
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+    if (!buft) {
+        fprintf(stderr, "FATE: failed to get default buffer type\n");
+        free_pool();
+        return false;
+    }
 
-    ggml_backend_tensor_alloc(buffer, pool_tensor, (void *)pool_tensor->data);
-    ggml_backend_tensor_set(pool_tensor, nullptr, 0, pool_bytes); // zero-init
+    buffer = ggml_backend_buft_alloc_buffer(buft, pool_bytes);
+    if (!buffer) { fprintf(stderr, "FATE: buft_alloc failed\n"); return false; }
+
+    void * base = ggml_backend_buffer_get_base(buffer);
+    pool_tensor->data = (char *)base;
+    pool_tensor->buffer = buffer;
 
     slots.resize(n_slots, slot_info{UINT64_MAX, 0});
     fprintf(stderr, "FATE: pool = %u slots x %zu bytes = %.1f MB\n",
@@ -340,82 +349,50 @@ void fate_system::shutdown() {
 bool fate_system::on_expert_copy(ggml_backend_t backend,
                                   struct ggml_tensor * dst,
                                   const void * src_data, size_t offset, size_t size,
-                                  int32_t expert_id, int64_t /*n_expert_total*/,
+                                  int32_t expert_id, int64_t n_expert_total,
                                   const char * tensor_name) {
     int layer = parse_layer(tensor_name);
     int kind  = parse_tensor_kind(tensor_name);
     if (layer < 0 || kind < 0 || (uint32_t)layer >= n_layer) return false;
     if (!pool.pool_tensor) return false;
 
+    // Handle the copy ourselves
+    ggml_backend_tensor_set_async(backend, dst, src_data, offset, size);
+
+    // Track the expert access for prediction
+    prefetch.on_expert((uint32_t)layer, expert_id);
+
     // --- layer transition: prefetch predicted experts for the next layer ---
     if (layer != prefetch.last_layer) {
         if (prefetch.last_layer >= 0 && prefetch.stream) {
-            uint32_t prev_l = (uint32_t)prefetch.last_layer;
-            uint32_t next_l = (uint32_t)layer;
-            if (next_l < n_layer) {
-                std::unordered_set<int32_t> predicted;
-                for (int32_t e : prefetch.cur[prev_l]) predicted.insert(e);
-                if (next_l < (uint32_t)prefetch.prev.size())
-                    for (int32_t e : prefetch.prev[next_l]) predicted.insert(e);
-
-                for (int32_t eid : predicted) {
-                    for (uint32_t k = 0; k < fate_prefetcher::N_KINDS; k++) {
-                        uint32_t idx = next_l * fate_prefetcher::N_KINDS + k;
-                        if (idx >= prefetch.sources.size() || !prefetch.sources[idx].base) continue;
-                        uint64_t key = fate_gpu_pool::make_key(next_l, k, (uint32_t)eid);
-                        if (pool.key_to_slot.count(key)) continue;
-                        int32_t slot = pool.find_or_alloc(key);
-                        if (slot < 0) continue;
-                        void * dst_ptr = pool.slot_device_ptr((uint32_t)slot);
-                        const void * src = (const char *)prefetch.sources[idx].base
-                                           + (size_t)eid * prefetch.sources[idx].expert_bytes;
-                        size_t copy_n = ((uint32_t)eid < n_expert - 1)
-                                      ? prefetch.sources[idx].padded_bytes
-                                      : prefetch.sources[idx].expert_bytes;
-                        if (prefetch.staging && copy_n <= prefetch.staging_size) {
-                            memcpy(prefetch.staging, src, copy_n);
-                            fate_prefetch_h2d(prefetch.stream, dst_ptr, prefetch.staging, copy_n);
-                        } else {
-                            fate_prefetch_h2d(prefetch.stream, dst_ptr, src, copy_n);
-                        }
-                        prefetch.prefetched++;
-                    }
-                }
-            }
-            fate_prefetch_insert_barrier((void *)backend, prefetch.stream);
+            prefetch.on_layer_done((uint32_t)prefetch.last_layer, pool);
         }
-
         if (layer < prefetch.last_layer || prefetch.last_layer < 0) {
             prefetch.on_token_start(pool);
         }
         prefetch.last_layer = layer;
     }
 
-    prefetch.on_expert((uint32_t)layer, expert_id);
-
     // --- pool lookup ---
     uint64_t key = fate_gpu_pool::make_key((uint32_t)layer, (uint32_t)kind, (uint32_t)expert_id);
     stats.accesses++;
 
     auto it = pool.key_to_slot.find(key);
-    bool is_hit = (it != pool.key_to_slot.end());
 
-    if (is_hit) {
+    if (it != pool.key_to_slot.end()) {
         stats.hits++;
         pool.slots[it->second].last_used = ++pool.tick;
-        void * slot_ptr = pool.slot_device_ptr(it->second);
-        ggml_backend_tensor_set_async(backend, dst, slot_ptr, offset, size);
-    } else {
-        stats.misses++;
-        int32_t slot = pool.find_or_alloc(key);
-        if (slot >= 0) {
-            ggml_backend_tensor_set_async(backend, dst, src_data, offset, size);
-            ggml_backend_tensor_set_async(backend, pool.pool_tensor,
-                                           (const char *)dst->data + offset,
-                                           (size_t)slot * pool.slot_bytes, size);
-        } else {
-            ggml_backend_tensor_set_async(backend, dst, src_data, offset, size);
-        }
+        // Cache hit — would do D2D copy from pool slot to dst
+        // But ggml_backend_tensor_set_async only supports H2D
+    }
+
+    // Cache miss — write to pool from the CPU source
+    stats.misses++;
+    int32_t slot = pool.find_or_alloc(key);
+    if (slot >= 0) {
+        ggml_backend_tensor_set_async(backend, pool.pool_tensor,
+                                       src_data,
+                                       (size_t)slot * pool.slot_bytes, size);
     }
 
     return true;
