@@ -2226,6 +2226,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
+        {"--fate"},
+        "enable FATE expert cache for MoE offloading",
+        [](common_params & params) {
+            params.fate = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--fate-cache"}, "MB",
+        "FATE cache size in MB (default: auto)",
+        [](common_params & params, const std::string & value) {
+            params.fate_cache_mb = std::stoi(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_FATE_CACHE"));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {

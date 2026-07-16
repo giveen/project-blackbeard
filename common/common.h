@@ -470,6 +470,10 @@ struct common_params {
     float   yarn_beta_slow        = -1.0f; // YaRN high correction dim
     int32_t yarn_orig_ctx         =     0; // YaRN original context length
 
+    // FATE: Fast Expert Caching for MoE offloading
+    bool    fate = false;
+    int32_t fate_cache_mb = 0;
+
     // offload params
     std::vector<ggml_backend_dev_t> devices; // devices to use for offloading
 
