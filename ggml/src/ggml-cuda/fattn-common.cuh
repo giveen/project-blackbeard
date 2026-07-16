@@ -163,7 +163,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q4_0(
         const int shift = k_KQ & (QI8_1/2);
 
         int v;
-        ggml_cuda_memcpy_1<sizeof(int), 2>(&v, K_q4_0[ib].qs + sizeof(int)*iqs4);
+        ggml_cuda_memcpy_1<sizeof(int)>(&v, K_q4_0[ib].qs + sizeof(int)*iqs4);
         v = (v >> shift) & 0x0F0F0F0F;
         const int u = Q_q8[k_KQ_0/nthreads];
 
@@ -228,12 +228,12 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_0(
         const int shift = k_KQ & (QI8_1/2);
 
         int v;
-        ggml_cuda_memcpy_1<sizeof(int), 2>(&v, K_q5_0[ib].qs + sizeof(int)*iqs4);
+        ggml_cuda_memcpy_1<sizeof(int)>(&v, K_q5_0[ib].qs + sizeof(int)*iqs4);
         v = (v >> shift) & 0x0F0F0F0F;
 
         {
             int vh;
-            ggml_cuda_memcpy_1<sizeof(int), 2>(&vh, K_q5_0[ib].qh);
+        ggml_cuda_memcpy_1<sizeof(int)>(&vh, K_q5_0[ib].qh);
             vh >>= iqs8 * QI5_0;
 
             v |= (vh <<  4) & 0x00000010; // 0 ->  4
@@ -317,7 +317,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q8_0(
         const int iqs = k_KQ % QI8_0;
 
         int v;
-        ggml_cuda_memcpy_1<sizeof(v), 2>(&v, K_q8_0[ib].qs + 4*iqs);
+        ggml_cuda_memcpy_1<sizeof(int)>(&v, K_q8_0[ib].qs + 4*iqs);
 
         const float2 * Q_ds = (const float2 *) Q_ds_v;
         const float Q_d = Q_ds[k_KQ_0/nthreads].x;
