@@ -5,3 +5,4 @@ bench_*.csv
 *.o
 *.d
 wikitext-2-raw/
+.cache/
