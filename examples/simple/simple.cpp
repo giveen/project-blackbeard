@@ -23,60 +23,37 @@ int main(int argc, char ** argv) {
     // number of tokens to predict
     int n_predict = 32;
     bool fate = false;
+    bool no_mmap = false;
 
     // parse command line arguments
-
     {
         int i = 1;
         for (; i < argc; i++) {
             if (strcmp(argv[i], "-m") == 0) {
-                if (i + 1 < argc) {
-                    model_path = argv[++i];
-                } else {
-                    print_usage(argc, argv);
-                    return 1;
-                }
+                if (i + 1 < argc) { model_path = argv[++i]; }
+                else { print_usage(argc, argv); return 1; }
             } else if (strcmp(argv[i], "-n") == 0) {
                 if (i + 1 < argc) {
-                    try {
-                        n_predict = std::stoi(argv[++i]);
-                    } catch (...) {
-                        print_usage(argc, argv);
-                        return 1;
-                    }
-                } else {
-                    print_usage(argc, argv);
-                    return 1;
-                }
+                    try { n_predict = std::stoi(argv[++i]); }
+                    catch (...) { print_usage(argc, argv); return 1; }
+                } else { print_usage(argc, argv); return 1; }
             } else if (strcmp(argv[i], "-ngl") == 0) {
                 if (i + 1 < argc) {
-                    try {
-                        ngl = std::stoi(argv[++i]);
-                    } catch (...) {
-                        print_usage(argc, argv);
-                        return 1;
-                    }
-                } else {
-                    print_usage(argc, argv);
-                    return 1;
-                }
+                    try { ngl = std::stoi(argv[++i]); }
+                    catch (...) { print_usage(argc, argv); return 1; }
+                } else { print_usage(argc, argv); return 1; }
             } else if (strcmp(argv[i], "--fate") == 0) {
                 fate = true;
+            } else if (strcmp(argv[i], "--no-mmap") == 0) {
+                no_mmap = true;
             } else {
-                // prompt starts here
-                break;
+                break; // prompt starts here
             }
         }
-        if (model_path.empty()) {
-            print_usage(argc, argv);
-            return 1;
-        }
+        if (model_path.empty()) { print_usage(argc, argv); return 1; }
         if (i < argc) {
             prompt = argv[i++];
-            for (; i < argc; i++) {
-                prompt += " ";
-                prompt += argv[i];
-            }
+            for (; i < argc; i++) { prompt += " "; prompt += argv[i]; }
         }
     }
 
@@ -88,6 +65,7 @@ int main(int argc, char ** argv) {
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = ngl;
+    model_params.use_mmap = !no_mmap;
 
     llama_model * model = llama_model_load_from_file(model_path.c_str(), model_params);
 
@@ -117,8 +95,6 @@ int main(int argc, char ** argv) {
     // n_batch is the maximum number of tokens that can be processed in a single call to llama_decode
     ctx_params.n_batch = n_prompt;
     // enable performance counters
-    ctx_params.no_perf = false;
-
     llama_context * ctx = llama_init_from_model(model, ctx_params);
 
     if (ctx == NULL) {

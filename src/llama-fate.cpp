@@ -16,111 +16,26 @@
 #include <algorithm>
 
 // ---------------------------------------------------------------------------
-// Runtime dispatch for CUDA prefetch functions.
-//
-// These functions are defined in ggml-cuda.cu and exported from libggml-cuda.so,
-// which is loaded at runtime via dlopen(RTLD_LOCAL).  Because RTLD_LOCAL hides
-// the symbols from other libraries, we cannot rely on the linker to resolve them.
-// Instead we look them up via dlsym(RTLD_DEFAULT) at each call — after
-// ggml_backend_load_all() runs, the CUDA backend's symbols become visible
-// through the main binary's symbol table (since libggml-cuda.so links against
-// libcudart which is already in the global namespace).
-//
-// If a function is not yet available (CUDA backend not loaded), the dispatch
-// returns a no-op / failure value.
+// CUDA prefetch function stubs (used only when NOT linked against ggml-cuda)
+// When GGML_CUDA is enabled via CMake, FATE_HAS_CUDA is defined and the real
+// implementations in ggml-cuda.cu are linked directly through libggml-cuda.
 // ---------------------------------------------------------------------------
-
-#include <dlfcn.h>
-
-// Helper: resolve a CUDA function symbol at runtime
-template <typename T>
-static T resolve_cuda_func(const char * name) {
-    static void * handle = nullptr;
-    if (!handle) {
-        handle = dlopen("libggml-cuda.so", RTLD_LAZY | RTLD_NOLOAD);
-        if (!handle) {
-            handle = dlopen("libggml-cuda.so", RTLD_LAZY | RTLD_GLOBAL);
-        }
-    }
-    if (handle) {
-        void * sym = dlsym(handle, name);
-        if (sym) return reinterpret_cast<T>(sym);
-    }
-    // Fallback: try RTLD_DEFAULT (works if already in global namespace)
-    void * sym = dlsym(RTLD_DEFAULT, name);
-    if (sym) return reinterpret_cast<T>(sym);
-    return nullptr;
-}
-
+#ifndef FATE_HAS_CUDA
+#include <cstdio>
 extern "C" {
-
-void * fate_prefetch_stream_create(void) {
-    typedef void * (*fn_t)(void);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_stream_create");
-    return fn ? fn() : nullptr;
+void * fate_prefetch_stream_create(void) { return nullptr; }
+void   fate_prefetch_h2d(void *, void *, const void *, size_t) {}
+void   fate_prefetch_sync(void *) {}
+void   fate_prefetch_stream_destroy(void *) {}
+void   fate_prefetch_insert_barrier(void *, void *) {}
+bool   fate_prefetch_pin_memory(const void *, size_t) { return false; }
+void * fate_prefetch_alloc_pinned(size_t) { return nullptr; }
+void   fate_prefetch_free_pinned(void *) {}
+void   fate_debug_d2h(void *, const void *, size_t) {}
+int    fate_debug_ptr_type(const void *) { return -1; }
+void   fate_prefetch_d2d(void *, void *, const void *, size_t) {}
 }
-
-void fate_prefetch_h2d(void * s, void * d, const void * src, size_t n) {
-    typedef void (*fn_t)(void *, void *, const void *, size_t);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_h2d");
-    if (fn) fn(s, d, src, n);
-}
-
-void fate_prefetch_sync(void * s) {
-    typedef void (*fn_t)(void *);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_sync");
-    if (fn) fn(s);
-}
-
-void fate_prefetch_stream_destroy(void * s) {
-    typedef void (*fn_t)(void *);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_stream_destroy");
-    if (fn) fn(s);
-}
-
-void fate_prefetch_insert_barrier(void * bp, void * ps) {
-    typedef void (*fn_t)(void *, void *);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_insert_barrier");
-    if (fn) fn(bp, ps);
-}
-
-bool fate_prefetch_pin_memory(const void * p, size_t sz) {
-    typedef bool (*fn_t)(const void *, size_t);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_pin_memory");
-    return fn ? fn(p, sz) : false;
-}
-
-void * fate_prefetch_alloc_pinned(size_t sz) {
-    typedef void * (*fn_t)(size_t);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_alloc_pinned");
-    return fn ? fn(sz) : nullptr;
-}
-
-void fate_prefetch_free_pinned(void * p) {
-    typedef void (*fn_t)(void *);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_free_pinned");
-    if (fn) fn(p);
-}
-
-void fate_debug_d2h(void * d, const void * s, size_t n) {
-    typedef void (*fn_t)(void *, const void *, size_t);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_debug_d2h");
-    if (fn) fn(d, s, n);
-}
-
-int fate_debug_ptr_type(const void * p) {
-    typedef int (*fn_t)(const void *);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_debug_ptr_type");
-    return fn ? fn(p) : -1;
-}
-
-void fate_prefetch_d2d(void * bp, void * d, const void * s, size_t n) {
-    typedef void (*fn_t)(void *, void *, const void *, size_t);
-    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_d2d");
-    if (fn) fn(bp, d, s, n);
-}
-
-} // extern "C"
+#endif
 
 fate_system * g_fate = nullptr;
 
@@ -508,23 +423,35 @@ bool fate_system::init(const llama_model & model, ggml_backend_t backend, int32_
     }
 
     // Pin expert weight memory for truly async H2D prefetch
+    // Pin expert weight memory for truly async H2D prefetch.
+    // Only pin tensors that are resident in host (CPU) memory — GPU tensors
+    // are already directly accessible on device, and cudaHostRegister cannot
+    // pin device-allocated memory.
     uint32_t pinned = 0;
+    uint32_t n_total = 0;
     for (uint32_t il = 0; il < n_layer && il < (uint32_t)model.layers.size(); il++) {
         const auto & lay = model.layers[il];
+        auto try_pin = [&](ggml_tensor * t, const char * /*name*/) {
+            if (!t || !t->data) return;
+            n_total++;
+            // Skip GPU-resident tensors and already-pinned CUDA_Host tensors
+            if (t->buffer) {
+                if (!ggml_backend_buffer_is_host(t->buffer)) return; // GPU
+                const char * buf_name = ggml_backend_buffer_name(t->buffer);
+                if (strstr(buf_name, "CUDA_Host")) { pinned++; return; } // already pinned
+            }
+            if (fate_prefetch_pin_memory(t->data, ggml_nbytes(t))) pinned++;
+        };
         if (has_fused_gate_up) {
-            if (lay.ffn_gate_up_exps && lay.ffn_gate_up_exps->data)
-                pinned += fate_prefetch_pin_memory(lay.ffn_gate_up_exps->data, ggml_nbytes(lay.ffn_gate_up_exps));
+            try_pin(lay.ffn_gate_up_exps, "gate_up_exps");
         } else {
-            if (lay.ffn_gate_exps && lay.ffn_gate_exps->data)
-                pinned += fate_prefetch_pin_memory(lay.ffn_gate_exps->data, ggml_nbytes(lay.ffn_gate_exps));
-            if (lay.ffn_up_exps && lay.ffn_up_exps->data)
-                pinned += fate_prefetch_pin_memory(lay.ffn_up_exps->data, ggml_nbytes(lay.ffn_up_exps));
+            try_pin(lay.ffn_gate_exps, "gate_exps");
+            try_pin(lay.ffn_up_exps, "up_exps");
         }
-        if (lay.ffn_down_exps && lay.ffn_down_exps->data)
-            pinned += fate_prefetch_pin_memory(lay.ffn_down_exps->data, ggml_nbytes(lay.ffn_down_exps));
+        try_pin(lay.ffn_down_exps, "down_exps");
     }
     fprintf(stderr, "FATE: pinned %u/%u expert tensors for async prefetch\n",
-            pinned, n_layer * (has_fused_gate_up ? 2u : 3u));
+            pinned, n_total);
 
     // Init prefetcher with CPU source pointers for every expert tensor
     prefetch.init(n_layer, n_expert, n_expert_used, expert_bytes_max);
@@ -575,20 +502,13 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
     // --- layer transition: prefetch predicted experts for the next layer ---
     if (layer != prefetch.last_layer) {
         if (prefetch.last_layer >= 0 && prefetch.stream) {
-            // Prefetch predicted experts for the next layer.
-            // Uses either MTP-guided predictions or temporal/cross-layer fallback.
+            // Prefetch predicted experts for the next layer
             prefetch.on_layer_done((uint32_t)prefetch.last_layer, pool);
-            // Use CUDA event barrier instead of full sync when MTP guidance is active
-            // This lets the main stream proceed without waiting for prefetch to complete,
-            // as MTP predictions are more reliable and the prefetch should finish
-            // before the main stream reaches the predicted layer.
-            if (prefetch.use_mtp_pred) {
-                fate_prefetch_insert_barrier((void *)backend, prefetch.stream);
-            } else {
-                // Fallback: sync for temporal prediction (less reliable, higher risk of
-                // prefetch consuming bandwidth needed by main stream)
-                fate_prefetch_sync(prefetch.stream);
-            }
+            // CUDA event barrier: main stream waits for prefetch stream at this point,
+            // then continues compute while prefetch completes on its own stream.
+            // This avoids stalling the main stream at every layer boundary regardless
+            // of whether we use MTP-guided or temporal prediction.
+            fate_prefetch_insert_barrier((void *)backend, prefetch.stream);
         }
         if (layer < prefetch.last_layer || prefetch.last_layer < 0) {
             prefetch.on_token_start(pool);

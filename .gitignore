@@ -5,3 +5,5 @@ bench_*.csv
 *.o
 *.d
 wikitext-2-raw/
+build-cuda/
+build-mtp/
