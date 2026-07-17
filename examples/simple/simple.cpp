@@ -22,6 +22,7 @@ int main(int argc, char ** argv) {
     int ngl = 99;
     // number of tokens to predict
     int n_predict = 32;
+    bool fate = false;
 
     // parse command line arguments
 
@@ -59,6 +60,8 @@ int main(int argc, char ** argv) {
                     print_usage(argc, argv);
                     return 1;
                 }
+            } else if (strcmp(argv[i], "--fate") == 0) {
+                fate = true;
             } else {
                 // prompt starts here
                 break;
@@ -121,6 +124,11 @@ int main(int argc, char ** argv) {
     if (ctx == NULL) {
         fprintf(stderr , "%s: error: failed to create the llama_context\n" , __func__);
         return 1;
+    }
+
+    // initialize FATE expert cache if requested
+    if (fate) {
+        llama_fate_init(ctx, 0);
     }
 
     // initialize the sampler
@@ -216,6 +224,9 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "\n");
 
     llama_sampler_free(smpl);
+    if (fate) {
+        llama_fate_print_stats();
+    }
     llama_free(ctx);
     llama_model_free(model);
 

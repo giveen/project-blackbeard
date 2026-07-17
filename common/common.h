@@ -473,6 +473,8 @@ struct common_params {
     // FATE: Fast Expert Caching for MoE offloading
     bool    fate = false;
     int32_t fate_cache_mb = 0;
+    int32_t fate_k = 0;   // candidate experts per layer (0 = auto = n_expert_used)
+    int32_t fate_hot = 64; // hot experts always resident per layer (0 = disabled)
 
     // offload params
     std::vector<ggml_backend_dev_t> devices; // devices to use for offloading

@@ -9,10 +9,118 @@
 
 #include "llama-fate.h"
 #include "llama-model.h"
+#include "llama-context.h"  // for get_sched()
 
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+
+// ---------------------------------------------------------------------------
+// Runtime dispatch for CUDA prefetch functions.
+//
+// These functions are defined in ggml-cuda.cu and exported from libggml-cuda.so,
+// which is loaded at runtime via dlopen(RTLD_LOCAL).  Because RTLD_LOCAL hides
+// the symbols from other libraries, we cannot rely on the linker to resolve them.
+// Instead we look them up via dlsym(RTLD_DEFAULT) at each call — after
+// ggml_backend_load_all() runs, the CUDA backend's symbols become visible
+// through the main binary's symbol table (since libggml-cuda.so links against
+// libcudart which is already in the global namespace).
+//
+// If a function is not yet available (CUDA backend not loaded), the dispatch
+// returns a no-op / failure value.
+// ---------------------------------------------------------------------------
+
+#include <dlfcn.h>
+
+// Helper: resolve a CUDA function symbol at runtime
+template <typename T>
+static T resolve_cuda_func(const char * name) {
+    static void * handle = nullptr;
+    if (!handle) {
+        handle = dlopen("libggml-cuda.so", RTLD_LAZY | RTLD_NOLOAD);
+        if (!handle) {
+            handle = dlopen("libggml-cuda.so", RTLD_LAZY | RTLD_GLOBAL);
+        }
+    }
+    if (handle) {
+        void * sym = dlsym(handle, name);
+        if (sym) return reinterpret_cast<T>(sym);
+    }
+    // Fallback: try RTLD_DEFAULT (works if already in global namespace)
+    void * sym = dlsym(RTLD_DEFAULT, name);
+    if (sym) return reinterpret_cast<T>(sym);
+    return nullptr;
+}
+
+extern "C" {
+
+void * fate_prefetch_stream_create(void) {
+    typedef void * (*fn_t)(void);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_stream_create");
+    return fn ? fn() : nullptr;
+}
+
+void fate_prefetch_h2d(void * s, void * d, const void * src, size_t n) {
+    typedef void (*fn_t)(void *, void *, const void *, size_t);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_h2d");
+    if (fn) fn(s, d, src, n);
+}
+
+void fate_prefetch_sync(void * s) {
+    typedef void (*fn_t)(void *);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_sync");
+    if (fn) fn(s);
+}
+
+void fate_prefetch_stream_destroy(void * s) {
+    typedef void (*fn_t)(void *);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_stream_destroy");
+    if (fn) fn(s);
+}
+
+void fate_prefetch_insert_barrier(void * bp, void * ps) {
+    typedef void (*fn_t)(void *, void *);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_insert_barrier");
+    if (fn) fn(bp, ps);
+}
+
+bool fate_prefetch_pin_memory(const void * p, size_t sz) {
+    typedef bool (*fn_t)(const void *, size_t);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_pin_memory");
+    return fn ? fn(p, sz) : false;
+}
+
+void * fate_prefetch_alloc_pinned(size_t sz) {
+    typedef void * (*fn_t)(size_t);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_alloc_pinned");
+    return fn ? fn(sz) : nullptr;
+}
+
+void fate_prefetch_free_pinned(void * p) {
+    typedef void (*fn_t)(void *);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_free_pinned");
+    if (fn) fn(p);
+}
+
+void fate_debug_d2h(void * d, const void * s, size_t n) {
+    typedef void (*fn_t)(void *, const void *, size_t);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_debug_d2h");
+    if (fn) fn(d, s, n);
+}
+
+int fate_debug_ptr_type(const void * p) {
+    typedef int (*fn_t)(const void *);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_debug_ptr_type");
+    return fn ? fn(p) : -1;
+}
+
+void fate_prefetch_d2d(void * bp, void * d, const void * s, size_t n) {
+    typedef void (*fn_t)(void *, void *, const void *, size_t);
+    static fn_t fn = resolve_cuda_func<fn_t>("fate_prefetch_d2d");
+    if (fn) fn(bp, d, s, n);
+}
+
+} // extern "C"
 
 fate_system * g_fate = nullptr;
 
@@ -99,6 +207,43 @@ void * fate_gpu_pool::slot_device_ptr(uint32_t idx) {
 }
 
 // ===========================================================================
+// Observer — MTP draft expert selection recording
+// ===========================================================================
+
+void fate_observer::init(uint32_t nl) {
+    n_layer = nl;
+    selections.clear();
+    selections.resize(nl);
+}
+
+void fate_observer::observe(uint32_t layer, int32_t expert_id) {
+    if (layer >= n_layer) return;
+    std::lock_guard<std::mutex> lock(mtx);
+    selections[layer].push_back(expert_id);
+}
+
+void fate_observer::reset() {
+    std::lock_guard<std::mutex> lock(mtx);
+    for (auto &v : selections) v.clear();
+}
+
+bool fate_observer::has_data() const {
+    // can be called without lock during read — caller must synchronize
+    for (const auto &v : selections) {
+        if (!v.empty()) return true;
+    }
+    return false;
+}
+
+void fate_observer::extract(std::vector<std::vector<int32_t>> &out) const {
+    std::lock_guard<std::mutex> lock(const_cast<fate_observer *>(this)->mtx);
+    out.resize(selections.size());
+    for (size_t i = 0; i < selections.size(); i++) {
+        out[i] = selections[i]; // copy
+    }
+}
+
+// ===========================================================================
 // Prefetcher
 // ===========================================================================
 
@@ -109,6 +254,7 @@ void fate_prefetcher::init(uint32_t nl, uint32_t ne, uint32_t neu, size_t max_ex
 
     cur.resize(n_layer);
     prev.resize(n_layer);
+    mtp_pred.resize(n_layer);
 
     sources.resize(n_layer * N_KINDS);
 
@@ -171,6 +317,11 @@ void fate_prefetcher::on_token_start(fate_gpu_pool & /*pool*/) {
     std::swap(cur, prev);
     for (auto & v : cur) v.clear();
     last_layer = -1;
+    // MTP predictions persist across tokens — they're refreshed by the next
+    // MTP draft decode. Clear only if not using MTP guidance.
+    if (!use_mtp_pred) {
+        clear_mtp_prediction();
+    }
 }
 
 void fate_prefetcher::on_expert(uint32_t layer, int32_t expert_id) {
@@ -179,23 +330,21 @@ void fate_prefetcher::on_expert(uint32_t layer, int32_t expert_id) {
     }
 }
 
-void fate_prefetcher::on_layer_done(uint32_t layer, fate_gpu_pool & pool) {
-    if (layer + 1 >= n_layer) return;
+// Shared helper: issue prefetch work for a set of experts at a given layer
+void fate_prefetcher::prefetch_experts_for_layer(uint32_t layer,
+                                                  const std::unordered_set<int32_t> &expert_set,
+                                                  fate_gpu_pool & pool) {
     if (!stream) return;
-
-    std::unordered_set<int32_t> predicted;
-    for (int32_t e : cur[layer]) predicted.insert(e);
-    if (layer + 1 < (uint32_t)prev.size())
-        for (int32_t e : prev[layer + 1]) predicted.insert(e);
+    if (layer >= n_layer) return;
+    if (expert_set.empty()) return;
 
     std::vector<job> work;
-    for (int32_t eid : predicted) {
-        uint32_t next_l = layer + 1;
+    for (int32_t eid : expert_set) {
         for (uint32_t k = 0; k < N_KINDS; k++) {
-            uint32_t idx = next_l * N_KINDS + k;
+            uint32_t idx = layer * N_KINDS + k;
             if (idx >= sources.size() || !sources[idx].base) continue;
-            uint64_t key = fate_gpu_pool::make_key(next_l, k, (uint32_t)eid);
-            if (pool.key_to_slot.count(key)) continue;
+            uint64_t key = fate_gpu_pool::make_key(layer, k, (uint32_t)eid);
+            if (pool.key_to_slot.count(key)) continue; // already cached
             int32_t slot = pool.find_or_alloc(key);
             if (slot < 0) continue;
             void * dst_ptr = pool.slot_device_ptr((uint32_t)slot);
@@ -210,6 +359,28 @@ void fate_prefetcher::on_layer_done(uint32_t layer, fate_gpu_pool & pool) {
     if (!work.empty()) {
         submit(std::move(work));
         prefetched += work.size();
+    }
+}
+
+void fate_prefetcher::on_layer_done(uint32_t layer, fate_gpu_pool & pool) {
+    if (layer + 1 >= n_layer) return;
+    if (!stream) return;
+
+    if (use_mtp_pred && !mtp_pred.empty() && !mtp_pred[layer + 1].empty()) {
+        // --- MTP-guided prediction ---
+        // Use the MTP draft head's predicted experts for the next layer
+        std::unordered_set<int32_t> predicted(mtp_pred[layer + 1].begin(),
+                                               mtp_pred[layer + 1].end());
+        prefetch_experts_for_layer(layer + 1, predicted, pool);
+    } else {
+        // --- Temporal + cross-layer heuristic (fallback) ---
+        std::unordered_set<int32_t> predicted;
+        for (int32_t e : cur[layer]) predicted.insert(e);
+        if (layer + 1 < (uint32_t)prev.size())
+            for (int32_t e : prev[layer + 1]) predicted.insert(e);
+        if (!predicted.empty()) {
+            prefetch_experts_for_layer(layer + 1, predicted, pool);
+        }
     }
 }
 
@@ -231,6 +402,19 @@ void fate_prefetcher::shutdown() {
     if (stream)  { fate_prefetch_stream_destroy(stream); stream = nullptr; }
 }
 
+void fate_prefetcher::set_mtp_prediction(const std::vector<std::vector<int32_t>> &per_layer_pred) {
+    if (per_layer_pred.size() != n_layer) return;
+    for (uint32_t i = 0; i < n_layer; i++) {
+        mtp_pred[i] = per_layer_pred[i];
+    }
+    use_mtp_pred = true;
+}
+
+void fate_prefetcher::clear_mtp_prediction() {
+    for (auto &v : mtp_pred) v.clear();
+    use_mtp_pred = false;
+}
+
 // ===========================================================================
 // Helpers
 // ===========================================================================
@@ -248,12 +432,13 @@ int fate_system::parse_layer(const char * name) {
 
 int fate_system::parse_tensor_kind(const char * name) {
     if (!name) return -1;
-    if (strstr(name, "ffn_gate_exps"))  return 0;
-    if (strstr(name, "ffn_gate"))       return 0;
-    if (strstr(name, "ffn_up_exps"))    return 1;
-    if (strstr(name, "ffn_up"))         return 1;
-    if (strstr(name, "ffn_down_exps"))  return 2;
-    if (strstr(name, "ffn_down"))       return 2;
+    if (strstr(name, "ffn_gate_up_exps")) return 0; // fused gate+up
+    if (strstr(name, "ffn_gate_exps"))    return 0;
+    if (strstr(name, "ffn_gate"))         return 0;
+    if (strstr(name, "ffn_up_exps"))      return 1;
+    if (strstr(name, "ffn_up"))           return 1;
+    if (strstr(name, "ffn_down_exps"))    return 2;
+    if (strstr(name, "ffn_down"))         return 2;
     return -1;
 }
 
@@ -274,25 +459,43 @@ bool fate_system::init(const llama_model & model, ggml_backend_t backend, int32_
         return false;
     }
 
+    // Initialize observer for MTP draft context
+    observer.init(n_layer + hp.n_layer_nextn);
+
+    // Detect tensor format: fused (ffn_gate_up_exps) or separate (ffn_gate_exps + ffn_up_exps)
+    bool has_fused_gate_up = false;
+    if (!model.layers.empty()) {
+        const auto & lay0 = model.layers[0];
+        has_fused_gate_up = (lay0.ffn_gate_up_exps != nullptr) &&
+                            (lay0.ffn_gate_exps == nullptr);
+    }
+
     // Use nb[2] (the actual per-expert stride the scheduler uses) instead of
     // ggml_nbytes/n_expert, because Q4_K_M uses different quant types per layer.
-    size_t gate_bytes_max = 0, up_bytes_max = 0, down_bytes_max = 0;
+    size_t gate_up_bytes_max = 0, down_bytes_max = 0;
     for (uint32_t il = 0; il < n_layer && il < (uint32_t)model.layers.size(); il++) {
         const auto & lay = model.layers[il];
-        if (lay.ffn_gate_exps && lay.ffn_gate_exps->nb[2] > 0)
-            gate_bytes_max = std::max(gate_bytes_max, (size_t)lay.ffn_gate_exps->nb[2]);
-        if (lay.ffn_up_exps && lay.ffn_up_exps->nb[2] > 0)
-            up_bytes_max = std::max(up_bytes_max, (size_t)lay.ffn_up_exps->nb[2]);
+        if (has_fused_gate_up) {
+            if (lay.ffn_gate_up_exps && lay.ffn_gate_up_exps->nb[2] > 0)
+                gate_up_bytes_max = std::max(gate_up_bytes_max, (size_t)lay.ffn_gate_up_exps->nb[2]);
+        } else {
+            if (lay.ffn_gate_exps && lay.ffn_gate_exps->nb[2] > 0)
+                gate_up_bytes_max = std::max(gate_up_bytes_max, (size_t)lay.ffn_gate_exps->nb[2]);
+            if (lay.ffn_up_exps && lay.ffn_up_exps->nb[2] > 0)
+                gate_up_bytes_max = std::max(gate_up_bytes_max, (size_t)lay.ffn_up_exps->nb[2]);
+        }
         if (lay.ffn_down_exps && lay.ffn_down_exps->nb[2] > 0)
             down_bytes_max = std::max(down_bytes_max, (size_t)lay.ffn_down_exps->nb[2]);
     }
 
-    expert_bytes_max = std::max({gate_bytes_max, up_bytes_max, down_bytes_max});
+    expert_bytes_max = std::max(gate_up_bytes_max, down_bytes_max);
     if (expert_bytes_max == 0) return false;
 
-    fprintf(stderr, "FATE: n_layer=%u n_expert=%u n_expert_used=%u\n", n_layer, n_expert, n_expert_used);
-    fprintf(stderr, "FATE: max expert strides: gate=%zuB up=%zuB down=%zuB max=%.1fMB\n",
-            gate_bytes_max, up_bytes_max, down_bytes_max, (float)expert_bytes_max / (1024*1024));
+    fprintf(stderr, "FATE: n_layer=%u n_expert=%u n_expert_used=%u%s\n",
+            n_layer, n_expert, n_expert_used,
+            has_fused_gate_up ? " (fused gate+up)" : "");
+    fprintf(stderr, "FATE: max expert strides: gate_up=%zuB down=%zuB max=%.1fMB\n",
+            gate_up_bytes_max, down_bytes_max, (float)expert_bytes_max / (1024*1024));
 
     size_t padded_slot = expert_bytes_max + 512;
     uint32_t min_slots = n_layer * n_expert_used * 3;
@@ -308,29 +511,39 @@ bool fate_system::init(const llama_model & model, ggml_backend_t backend, int32_
     uint32_t pinned = 0;
     for (uint32_t il = 0; il < n_layer && il < (uint32_t)model.layers.size(); il++) {
         const auto & lay = model.layers[il];
-        if (lay.ffn_gate_exps && lay.ffn_gate_exps->data)
-            pinned += fate_prefetch_pin_memory(lay.ffn_gate_exps->data, ggml_nbytes(lay.ffn_gate_exps));
-        if (lay.ffn_up_exps && lay.ffn_up_exps->data)
-            pinned += fate_prefetch_pin_memory(lay.ffn_up_exps->data, ggml_nbytes(lay.ffn_up_exps));
+        if (has_fused_gate_up) {
+            if (lay.ffn_gate_up_exps && lay.ffn_gate_up_exps->data)
+                pinned += fate_prefetch_pin_memory(lay.ffn_gate_up_exps->data, ggml_nbytes(lay.ffn_gate_up_exps));
+        } else {
+            if (lay.ffn_gate_exps && lay.ffn_gate_exps->data)
+                pinned += fate_prefetch_pin_memory(lay.ffn_gate_exps->data, ggml_nbytes(lay.ffn_gate_exps));
+            if (lay.ffn_up_exps && lay.ffn_up_exps->data)
+                pinned += fate_prefetch_pin_memory(lay.ffn_up_exps->data, ggml_nbytes(lay.ffn_up_exps));
+        }
         if (lay.ffn_down_exps && lay.ffn_down_exps->data)
             pinned += fate_prefetch_pin_memory(lay.ffn_down_exps->data, ggml_nbytes(lay.ffn_down_exps));
     }
     fprintf(stderr, "FATE: pinned %u/%u expert tensors for async prefetch\n",
-            pinned, n_layer * 3);
+            pinned, n_layer * (has_fused_gate_up ? 2u : 3u));
 
-    // Init prefetcher with CPU source pointers for every expert tensor.
+    // Init prefetcher with CPU source pointers for every expert tensor
     prefetch.init(n_layer, n_expert, n_expert_used, expert_bytes_max);
     for (uint32_t il = 0; il < n_layer && il < (uint32_t)model.layers.size(); il++) {
         const auto & lay = model.layers[il];
-        if (lay.ffn_gate_exps && lay.ffn_gate_exps->data)
-            prefetch.register_src(il, 0, lay.ffn_gate_exps->data, (size_t)lay.ffn_gate_exps->nb[2]);
-        if (lay.ffn_up_exps && lay.ffn_up_exps->data)
-            prefetch.register_src(il, 1, lay.ffn_up_exps->data, (size_t)lay.ffn_up_exps->nb[2]);
+        if (has_fused_gate_up) {
+            if (lay.ffn_gate_up_exps && lay.ffn_gate_up_exps->data)
+                prefetch.register_src(il, 0, lay.ffn_gate_up_exps->data, (size_t)lay.ffn_gate_up_exps->nb[2]);
+        } else {
+            if (lay.ffn_gate_exps && lay.ffn_gate_exps->data)
+                prefetch.register_src(il, 0, lay.ffn_gate_exps->data, (size_t)lay.ffn_gate_exps->nb[2]);
+            if (lay.ffn_up_exps && lay.ffn_up_exps->data)
+                prefetch.register_src(il, 1, lay.ffn_up_exps->data, (size_t)lay.ffn_up_exps->nb[2]);
+        }
         if (lay.ffn_down_exps && lay.ffn_down_exps->data)
             prefetch.register_src(il, 2, lay.ffn_down_exps->data, (size_t)lay.ffn_down_exps->nb[2]);
     }
 
-    fprintf(stderr, "FATE: system initialized (%u cache slots + prefetch)\n", pool.n_slots);
+    fprintf(stderr, "FATE: system initialized (%u cache slots + prefetch + MTP observer)\n", pool.n_slots);
     return true;
 }
 
@@ -356,17 +569,26 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
     if (layer < 0 || kind < 0 || (uint32_t)layer >= n_layer) return false;
     if (!pool.pool_tensor) return false;
 
-    // Track the expert access for prediction
+    // Track the expert access for temporal prediction fallback
     prefetch.on_expert((uint32_t)layer, expert_id);
 
     // --- layer transition: prefetch predicted experts for the next layer ---
     if (layer != prefetch.last_layer) {
         if (prefetch.last_layer >= 0 && prefetch.stream) {
-            // Synchronously prefetch predicted experts for the next layer
+            // Prefetch predicted experts for the next layer.
+            // Uses either MTP-guided predictions or temporal/cross-layer fallback.
             prefetch.on_layer_done((uint32_t)prefetch.last_layer, pool);
-            // Wait for prefetch stream to finish before main stream proceeds
-            // (avoids graph capture issues with cross-stream events)
-            fate_prefetch_sync(prefetch.stream);
+            // Use CUDA event barrier instead of full sync when MTP guidance is active
+            // This lets the main stream proceed without waiting for prefetch to complete,
+            // as MTP predictions are more reliable and the prefetch should finish
+            // before the main stream reaches the predicted layer.
+            if (prefetch.use_mtp_pred) {
+                fate_prefetch_insert_barrier((void *)backend, prefetch.stream);
+            } else {
+                // Fallback: sync for temporal prediction (less reliable, higher risk of
+                // prefetch consuming bandwidth needed by main stream)
+                fate_prefetch_sync(prefetch.stream);
+            }
         }
         if (layer < prefetch.last_layer || prefetch.last_layer < 0) {
             prefetch.on_token_start(pool);
@@ -405,6 +627,90 @@ bool fate_system::on_expert_copy(ggml_backend_t backend,
 }
 
 // ===========================================================================
+// Observer-only hook — records expert selections without caching
+//
+// Installed on the MTP draft context's scheduler.
+// ===========================================================================
+
+bool fate_system::on_expert_observe(void * user_data,
+                                     ggml_backend_t backend,
+                                     struct ggml_tensor * dst,
+                                     const void * src_data, size_t offset, size_t size,
+                                     int32_t expert_id, int64_t n_expert_total,
+                                     const char * tensor_name) {
+    (void)backend;
+    (void)dst;
+    (void)src_data;
+    (void)offset;
+    (void)size;
+    (void)n_expert_total;
+
+    auto * sys = (fate_system *)user_data;
+    if (!sys) return false;
+
+    int layer = parse_layer(tensor_name);
+    if (layer < 0) return false;
+
+    sys->observer.observe((uint32_t)layer, expert_id);
+    return false; // don't handle — let normal copy proceed
+}
+
+// ===========================================================================
+// Transfer observer data → MTP prediction buffer
+// ===========================================================================
+
+void fate_system::transfer_observer_to_prediction(uint32_t mtp_layer_offset) {
+    if (!observer.has_data()) return;
+
+    // Extract observed expert IDs from the MTP draft decode
+    std::vector<std::vector<int32_t>> observed;
+    observer.extract(observed);
+
+    // Build per-trunk-layer predictions from MTP head observations.
+    // MTP head layer at index `mtp_layer_offset` in the model has its own MoE FFN.
+    // We use its expert selections as predictions for ALL trunk layers.
+    // This is the paper's key finding: MTP head routing decisions strongly
+    // correlate with trunk routing decisions for the next token.
+    std::vector<std::vector<int32_t>> per_layer_pred(n_layer);
+
+    if (mtp_layer_offset < observed.size() && !observed[mtp_layer_offset].empty()) {
+        // Build a deduplicated prediction set for the observed MTP layer
+        std::unordered_set<int32_t> pred_set(observed[mtp_layer_offset].begin(),
+                                              observed[mtp_layer_offset].end());
+        std::vector<int32_t> pred(pred_set.begin(), pred_set.end());
+        // Use the same prediction for all trunk layers
+        for (uint32_t il = 0; il < n_layer; il++) {
+            per_layer_pred[il] = pred;
+        }
+    } else if (observed.size() > mtp_layer_offset) {
+        // Fallback: search all observed layers for data
+        for (uint32_t i = 0; i < observed.size(); i++) {
+            if (!observed[i].empty()) {
+                std::unordered_set<int32_t> pred_set(observed[i].begin(), observed[i].end());
+                std::vector<int32_t> pred(pred_set.begin(), pred_set.end());
+                for (uint32_t il = 0; il < n_layer; il++) {
+                    per_layer_pred[il] = pred;
+                }
+                break;
+            }
+        }
+    }
+
+    bool any_nonempty = false;
+    for (const auto &v : per_layer_pred) {
+        if (!v.empty()) { any_nonempty = true; break; }
+    }
+
+    if (any_nonempty) {
+        prefetch.set_mtp_prediction(per_layer_pred);
+        fprintf(stderr, "FATE: MTP prediction active (%zu experts/layer from %u MTP heads)\n",
+                per_layer_pred[0].size(), (unsigned)observed.size());
+    }
+
+    observer.reset();
+}
+
+// ===========================================================================
 // Stats
 // ===========================================================================
 
@@ -413,7 +719,30 @@ void fate_system::print_stats() const {
     uint64_t h = stats.hits.load();
     uint64_t m = stats.misses.load();
     double pct = a > 0 ? 100.0 * (double)h / (double)a : 0.0;
-    fprintf(stderr, "\nFATE: %lu accesses, %lu hits (%.1f%%), %lu misses, %llu prefetched\n",
+    fprintf(stderr, "\nFATE: %lu accesses, %lu hits (%.1f%%), %lu misses, %llu prefetched%s\n",
             (unsigned long)a, (unsigned long)h, pct, (unsigned long)m,
-            (unsigned long long)prefetch.prefetched.load());
+            (unsigned long long)prefetch.prefetched.load(),
+            prefetch.use_mtp_pred ? " [MTP-guided]" : " [temporal]");
+}
+
+// ===========================================================================
+// Public API
+// ===========================================================================
+
+void llama_fate_install_observer(llama_context * ctx) {
+    if (!g_fate || !ctx) return;
+
+    // Get the context's scheduler and install observer-only hook
+    auto * sched = ctx->get_sched();
+    if (!sched) return;
+
+    ggml_backend_sched_set_expert_hook(sched, fate_system::on_expert_observe, (void *)g_fate);
+    fprintf(stderr, "FATE: observer installed on context\n");
+}
+
+void llama_fate_transfer_prediction() {
+    if (!g_fate) return;
+    // MTB head layer offset: for models with n_layer trunk + n_layer_nextn MTP blocks,
+    // the first MTP head's MoE layer is at index n_layer.
+    g_fate->transfer_observer_to_prediction(g_fate->n_layer);
 }

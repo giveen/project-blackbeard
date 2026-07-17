@@ -2071,6 +2071,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // wait for the computation to finish (automatically done when obtaining the model output)
     //synchronize();
 
+    // FATE: auto-transfer observer data from MTP draft decode to prediction buffer
+    // This runs after a successful MTP-type context decode, making the observed
+    // expert selections available as predictions for the next main context decode.
+    if (g_fate && cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+        ::llama_fate_transfer_prediction();
+    }
+
     return 0;
 }
 
@@ -4254,3 +4261,4 @@ bool llama_fate_init(llama_context * ctx, int32_t cache_mb) {
 void llama_fate_print_stats(void) {
     if (g_fate) g_fate->print_stats();
 }
+

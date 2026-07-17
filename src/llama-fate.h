@@ -22,8 +22,9 @@
 #include <vector>
 
 struct llama_model;
-
+struct llama_context;
 // CUDA prefetch functions (implemented in ggml-cuda.cu)
+// Weak stubs provided in llama-fate.cpp for builds without CUDA
 extern "C" {
     void * fate_prefetch_stream_create(void);
     void   fate_prefetch_h2d(void * stream, void * dst, const void * src, size_t n);
@@ -70,9 +71,10 @@ struct fate_gpu_pool {
 // Background prefetch engine
 //
 // Uses a separate CUDA stream + worker thread to overlap H2D expert copies
-// with GPU compute.  Two prediction strategies:
-//   1. Temporal:     previous token's experts for each layer
-//   2. Cross-layer:  current layer's experts predict next layer's experts
+// with GPU compute.  Supports three prediction strategies:
+//   1. MTP-guided:    expert selections from the MTP draft head (preferred)
+//   2. Temporal:      previous token's experts for each layer
+//   3. Cross-layer:   current layer's experts predict next layer's experts
 // ---------------------------------------------------------------------------
 struct fate_prefetcher {
     static const uint32_t N_KINDS = 4;
@@ -109,6 +111,15 @@ struct fate_prefetcher {
 
     std::atomic<uint64_t> prefetched{0};
 
+    // --- MTP-guided prediction ---
+    // Set externally with predictions from the MTP draft head's router output.
+    // When mtp_pred[layer] is non-empty, it overrides the temporal/cross-layer heuristic.
+    bool use_mtp_pred = false;
+    std::vector<std::vector<int32_t>> mtp_pred; // [trunk_layer] → predicted expert IDs
+
+    void set_mtp_prediction(const std::vector<std::vector<int32_t>> &per_layer_pred);
+    void clear_mtp_prediction();
+
     void init(uint32_t nl, uint32_t ne, uint32_t neu, size_t max_expert_bytes);
     void register_src(uint32_t layer, uint32_t kind, const void * base, size_t eb);
     void on_token_start(fate_gpu_pool & pool);
@@ -120,6 +131,28 @@ struct fate_prefetcher {
 private:
     void submit(std::vector<job> && work);
     void worker_fn();
+    void prefetch_experts_for_layer(uint32_t layer, const std::unordered_set<int32_t> &expert_set, fate_gpu_pool & pool);
+};
+
+// ---------------------------------------------------------------------------
+// Expert selection observer — records expert IDs during MTP draft decode
+//
+// Installed as a lightweight hook on the MTP draft context's scheduler.
+// Records (layer, expert_id) pairs without caching or prefetching.
+// After the draft decode, the recorded data is transferred to
+// fate_prefetcher::mtp_pred for use by the main context's prefetch engine.
+// ---------------------------------------------------------------------------
+struct fate_observer {
+    // [layer] → expert IDs seen during this draft decode
+    std::vector<std::vector<int32_t>> selections;
+    std::mutex mtx;
+    uint32_t n_layer = 0;
+
+    void init(uint32_t nl);
+    void observe(uint32_t layer, int32_t expert_id);
+    void reset();
+    bool has_data() const;
+    void extract(std::vector<std::vector<int32_t>> &out) const;
 };
 
 // ---------------------------------------------------------------------------
@@ -135,20 +168,37 @@ struct fate_system {
     fate_prefetcher  prefetch;
     ggml_backend_t   gpu_backend = nullptr;
 
+    // Stats
     struct {
         std::atomic<uint64_t> accesses{0};
         std::atomic<uint64_t> hits{0};
         std::atomic<uint64_t> misses{0};
     } stats;
 
+    // Observer for MTP draft context
+    fate_observer observer;
+
     bool init(const llama_model & model, ggml_backend_t backend, int32_t cache_mb = 0);
     void shutdown();
 
+    // Full hook: cache + prefetch (for main context)
     bool on_expert_copy(ggml_backend_t backend,
                         struct ggml_tensor * dst,
                         const void * src_data, size_t offset, size_t size,
                         int32_t expert_id, int64_t n_expert_total,
                         const char * tensor_name);
+
+    // Observer-only hook: record expert selections (for MTP draft context)
+    static bool on_expert_observe(void * user_data,
+                                   ggml_backend_t backend,
+                                   struct ggml_tensor * dst,
+                                   const void * src_data, size_t offset, size_t size,
+                                   int32_t expert_id, int64_t n_expert_total,
+                                   const char * tensor_name);
+
+    // Transfer observer data to prefetcher's MTP prediction buffer
+    // Maps MTP head layers → trunk layers for prediction
+    void transfer_observer_to_prediction(uint32_t mtp_layer_offset);
 
     void print_stats() const;
 

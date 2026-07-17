@@ -2359,8 +2359,9 @@ common_speculative_init_result::common_speculative_init_result(
             LOG_ERR("%s: failed to create MTP context\n", __func__);
             return;
         }
-
         pimpl->context.reset(ctx_dft);
+        // Install FATE observer on the draft context to capture MTP head expert selections
+        llama_fate_install_observer(ctx_dft);
     } else if (spec_mtp) {
         model_path = params.model.path;
 
@@ -2373,6 +2374,9 @@ common_speculative_init_result::common_speculative_init_result(
         }
 
         pimpl->context.reset(ctx_dft);
+
+        // Install FATE observer on the MTP draft context to capture router expert selections
+        llama_fate_install_observer(ctx_dft);
     }
 }
 

@@ -2240,6 +2240,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_FATE_CACHE"));
     add_opt(common_arg(
+        {"--fate-k"}, "N",
+        "number of candidate experts to prefetch per layer (default: auto = model's n_expert_used)",
+        [](common_params & params, const std::string & value) {
+            params.fate_k = std::max(1, std::stoi(value));
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_FATE_K"));
+    add_opt(common_arg(
+        {"--fate-hot"}, "N",
+        "number of hot experts to keep always resident per layer (default: 64, 0 = disabled)",
+        [](common_params & params, const std::string & value) {
+            params.fate_hot = std::max(0, std::stoi(value));
+        }
+    ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_FATE_HOT"));
+    add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
         [](common_params & params) {

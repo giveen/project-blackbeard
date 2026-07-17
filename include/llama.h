@@ -1035,6 +1035,10 @@ extern "C" {
     // FATE: Fast Expert Caching for MoE offloading
     LLAMA_API bool llama_fate_init(struct llama_context * ctx, int32_t cache_mb);
     LLAMA_API void llama_fate_print_stats(void);
+    // Install observer-only FATE hook on a context (for MTP draft expert tracking)
+    LLAMA_API void llama_fate_install_observer(struct llama_context * ctx);
+    // Transfer observed MTP draft expert selections to prediction buffer
+    LLAMA_API void llama_fate_transfer_prediction(void);
 
     // Token logits obtained from the last call to llama_decode()
     // The logits for which llama_batch.logits[i] != 0 are stored contiguously
