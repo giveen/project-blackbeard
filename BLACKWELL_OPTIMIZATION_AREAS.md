@@ -23,6 +23,7 @@
 | `43b7c8e83` | Planning doc v1 | — |
 | `e360d7aa4` | iter_k=1024 + 19 types + FA | +88% pp512 |
 | `c08f247b5` | nwarps=1 NVFP4 decode | **+5.2%** tg (207→219 t/s) |
+| `d62e7a96c` | nwarps=1 Q4_K decode | Neutral (~+0.8%) |
 
 ### Final Benchmarks (RTX 5090, -ngl 99, -t 24)
 
@@ -146,16 +147,23 @@ There are TWO NVFP4 tile-load functions:
 The crash was in the NVFP4 prefill path (NVFP4×q8_1), which uses the template iter_k
 variant. This is why iter_k scaling works for Q4_K/Q5_K but crashes NVFP4.
 
-### 4. Decode Is Memory-Bandwidth-Bound on RTX 5090
+### 4. Decode Is Memory-Latency-Bound on RTX 5090
 Every MMVQ tuning attempt was neutral for decode (tg128: 365→368 t/s):
 - nwarps=8: **-26%** (too much shared-mem reduction overhead)
 - nwarps=2: **impossible** (blocks_per_iter=0 for VDR=2 types)
 - rows_per_block=2: neutral
 - VDR=4 for Q4_K: neutral
+- nwarps=1 Q4_K: neutral (~+0.8%, within noise)
+- rows_per_block=4: **-1.4%** (fewer blocks = less parallelism, reg pressure)
 
 The RTX 5090's 1.8 TB/s memory bandwidth saturates the MMVQ compute pipeline at
 ~368 t/s for a 30B MoE model. Further decode gains require reducing memory traffic
 (e.g., weight-only quantization, speculative decoding) rather than compute tuning.
+
+### 6. MMVQ Is ~74% of Decode Time (Not 3%!)
+Easy to miscalculate: 7 MMVQ calls/layer × 48 layers = 336 calls. At ~6-8 µs each
+(parallel across SMs), MMVQ dominates decode. The remaining ~26% is attention,
+RMS norm, RoPE, element-wise ops, and kernel launch overhead.
 
 ### 5. nwarps × VDR × warp_size / qi Must Be ≥ 1
 The formula `blocks_per_iter = vdr * nwarps * warp_size / qi` must produce ≥ 1 for
@@ -188,9 +196,13 @@ nwarps tuning options.
 - [ ] Run `llama-perplexity` on NVFP4 model to verify correctness
 
 ### Tier 2: Medium Effort (1-3 hours)
-- [ ] **Investigate speculative decoding** — the only proven way to accelerate
-      memory-bandwidth-bound decode on Blackwell
+- [ ] **ld.global.nc / __ldg for q8_1 reads** — bypass L1 for single-use q8_1
+      data, preserving L1 for reusable weights. Requires Blackwell-only vec_dot path.
+- [ ] **cp.async software pipelining** — overlap weight loads with compute in MMVQ
+      inner loop. Needs coalesced tile loads (may conflict with Q4_K scatter pattern).
 - [ ] **Tune FA VEC path** for decode attention (currently uses VEC above 65536 ctx)
+- [ ] **Investigate speculative decoding** — the only proven way to accelerate
+      memory-latency-bound decode on Blackwell (multi-token per weight-load)
 - [ ] Try VDR increases for Q5_K, Q6_K on Blackwell (models after Q4_K pattern)
 - [ ] Profile NVFP4 model with `nsys` to identify decode bottlenecks
 
@@ -215,3 +227,5 @@ nwarps tuning options.
 | VDR changes | `vecdotq.cuh` | Q4_K block layout requires u[] duplication; test bit-identical |
 | FA dispatch | `fattn.cu` | Context-length thresholds are heuristics; benchmark extremes |
 | NVFP4 model | `27B-NVFP4/` | Crashes at pp>1 (pre-existing cublas FP32 issue, not our code) |
+| rows_per_block | `mmvq.cu` | rpb>2 reduces parallelism (fewer blocks → less latency hiding) |
+| nwarps=1 Q4_K | `mmvq.cu` | VDR=4 safe (blocks_per_iter=16) but complex vec_dot limits gain |
