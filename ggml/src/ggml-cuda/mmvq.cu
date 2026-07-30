@@ -429,11 +429,12 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
     }
     if (table_id == MMVQ_PARAMETERS_BLACKWELL) {
         // SM120: 256 KB register file, 128 KB shared memory.
-        // nwarps>4 at ncols_dst=1 regresses decode (-26%): the extra
-        // warp-reduction overhead dominates any occupancy gain.
+        // nwarps=2 regresses VDR=2 types (blocks_per_iter=0, infinite
+        // loop): vdr * nwarps * warp_size / qi = 2*2*32/256 = 0.
+        // nwarps=4 is safe for all VDR values (tested: decode neutral).
         // nwarps=8 for ncols_dst 2-4 (batch prefill), nwarps=4 for 5-8.
         if (ncols_dst == 1) {
-            return 4;  // same as GENERIC, decode path
+            return 4;  // safe for all types, neutral decode
         }
         switch (ncols_dst) {
             case 2:
