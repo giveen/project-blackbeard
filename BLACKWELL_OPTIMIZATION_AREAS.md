@@ -26,6 +26,9 @@
 | `d62e7a96c` | nwarps=1 Q4_K decode | Neutral (~+0.8%) |
 | `3e376d2c7` | __ldg q8_1 reads (Q4_K) | **+1.1%** tg (368→372) |
 | `26ae4d87a` | __ldg q8_1 reads (NVFP4) | Neutral (~218 t/s) |
+| `d3dcdc85f` | Update benchmarks + rbp findings | Docs |
+| `4fbffc943` | nsys decode profile analysis | Docs |
+| `4cfa16f82` | rpb tuning, PDL, quantize fusion | Docs |
 
 ### Final Benchmarks (RTX 5090, -ngl 99, -t 24)
 
@@ -33,10 +36,10 @@
 
 | Test | Ampere Baseline | After All Optimizations | Delta |
 |---|---:|---:|---|
-| pp128 | 4,429 t/s | 10,894 t/s | **+146%** |
-| pp512 | 11,176 t/s | 23,242 t/s | **+108%** |
-| tg128 | 365 t/s | **372 t/s** | **+1.9%** |
-| tg256 | 367 t/s | **372 t/s** | **+1.4%** |
+| pp128 | 4,429 t/s | 10,802 t/s | **+144%** |
+| pp512 | 11,176 t/s | 21,610 t/s | **+93%** |
+| tg128 | 365 t/s | 361 t/s | ~-1% (thermal?) |
+| tg256 | 367 t/s | 358 t/s | ~-2% (thermal?) |
 
 **NVFP4 35B MoE (22.88 GiB):**
 
@@ -241,8 +244,9 @@ nwarps tuning options.
 - [ ] Run `llama-perplexity` on NVFP4 model to verify correctness
 
 ### Tier 2: Medium Effort (1-3 hours)
-- [ ] **ld.global.nc / __ldg for q8_1 reads** — bypass L1 for single-use q8_1
-      data, preserving L1 for reusable weights. Requires Blackwell-only vec_dot path.
+- [x] __ldg q8_1 reads for Q4_K decode (**+1.1%**) — DONE
+- [ ] **Apply __ldg to MMQ prefill path** — same cache-bypass for q8_1 loads
+      in the MMQ tile-load kernel. Prefill equivalent of decode __ldg win.
 - [ ] **cp.async software pipelining** — overlap weight loads with compute in MMVQ
       inner loop. Needs coalesced tile loads (may conflict with Q4_K scatter pattern).
 - [ ] **Tune FA VEC path** for decode attention (currently uses VEC above 65536 ctx)
