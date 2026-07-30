@@ -1,7 +1,7 @@
 # Project Blackbeard — Blackwell FP4 Benchmark
 
-> **Date:** 2026-07-15 (original), 2026-07-29 (FA config update)
-> **Build:** `a58222229` (b10027, original) / `42ebe4a41` (b550, FA update)
+> **Date:** 2026-07-15 (original), 2026-07-29 (FA config update), 2026-07-29 (MMQ iter_k update)
+> **Build:** `a58222229` (b10027, original) / `42ebe4a41` (b550, FA update) / `775d1e6fd` (b553, MMQ update)
 > **GPU:** RTX 5090 (sm120 Blackwell), CUDA 13.3, 32 GiB VRAM
 > **CPU:** Intel Ultra 9 285K (24 P-cores), gcc-15.2
 
@@ -18,6 +18,25 @@
 | 27B dense Q5_K_XL | qwen35 | Q5_K_XL | 18.7 GiB | 26.9B | 26.9B |
 | 27B dense NVFP4 | qwen35 | NVFP4 | 23.7 GiB | 27.3B | 27.3B |
 | 30B MoE Q4_K_XL | qwen3moe | Q4_K_XL | 16.5 GiB | ~3B | 30.5B | (added 2026-07-29)
+
+---
+
+## Blackwell MMQ iter_k Tuning (2026-07-29, build `775d1e6fd`)
+
+**Change:** Q4_K and Q5_K standard quant types use `MMQ_ITER_K_FP4=512` instead
+of `MMQ_ITER_K=256` on Blackwell SM120. K_vram doubling improves arithmetic
+intensity for prefill matmuls. SMEM-neutral (I=128, J independent of K_vram).
+
+### Q4_K_XL 30B MoE — before/after
+
+| Test | Baseline (42ebe4a41) | MMQ update (775d1e6fd) | Delta |
+|---|---|---|---|
+| pp128 | 4,429 t/s | 7,994 t/s | **+80%** |
+| pp512 | 11,202 t/s | 17,758 t/s | **+59%** |
+| tg128 | 365 t/s | 363 t/s | -0.5% (noise) |
+| tg256 | 365 t/s | 364 t/s | -0.3% (noise) |
+
+Decode is unchanged (MMVQ path, not MMQ — K_vram does not affect decode).
 
 ---
 
