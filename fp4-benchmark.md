@@ -1,7 +1,7 @@
 # Project Blackbeard — Blackwell FP4 Benchmark
 
-> **Date:** 2026-07-15
-> **Build:** `a58222229` (b10027), backends stripped to CPU + CUDA only
+> **Date:** 2026-07-15 (original), 2026-07-29 (FA config update)
+> **Build:** `a58222229` (b10027, original) / `42ebe4a41` (b550, FA update)
 > **GPU:** RTX 5090 (sm120 Blackwell), CUDA 13.3, 32 GiB VRAM
 > **CPU:** Intel Ultra 9 285K (24 P-cores), gcc-15.2
 
@@ -14,7 +14,10 @@
 | 35B MoE Q4_K_S | qwen35moe | Q4_K_S | 19.5 GiB | ~3B | 34.7B |
 | 35B MoE NVFP4 | qwen35moe | NVFP4 | 22.9 GiB | ~3B | 35.5B |
 | 27B dense Q5_K_XL | qwen35 | Q5_K_XL | 18.7 GiB | 26.9B | 26.9B |
+| 35B MoE NVFP4 | qwen35moe | NVFP4 | 22.9 GiB | ~3B | 35.5B |
+| 27B dense Q5_K_XL | qwen35 | Q5_K_XL | 18.7 GiB | 26.9B | 26.9B |
 | 27B dense NVFP4 | qwen35 | NVFP4 | 23.7 GiB | 27.3B | 27.3B |
+| 30B MoE Q4_K_XL | qwen3moe | Q4_K_XL | 16.5 GiB | ~3B | 30.5B | (added 2026-07-29)
 
 ---
 
@@ -63,6 +66,46 @@ Same pattern: NVFP4 wins prompt processing (+30%), loses generation (-10%). The 
 | tg128 | 201 | 201 | ~0% |
 
 Flash attention provides a small but consistent boost to prompt processing (+2.6%). No impact on generation (already bandwidth-bound). This is expected — FA reduces the attention O(n^2) compute but the Blackwell FP4 MMA already keeps the compute units well-fed.
+
+---
+
+## Blackwell FA Config Tuning Results (2026-07-29, build `42ebe4a41`)
+
+Build: CMake Release, `GGML_CUDA_FA=ON`, `GGML_CUDA_FA_ALL_QUANTS=ON`, `GGML_CUDA_GRAPHS=ON`.
+
+Changes vs baseline:
+- SM120-specific MMA F16 FA config: D=256 uses `nthreads=128` (vs Ampere 64), `nbatch_fa=64`
+- cp.async KV tile preload: 128 B (vs 64 B)
+- Mask preload clamp at 256 B
+
+### NVFP4 35B MoE (exercises `fattn-mma-fp4.cuh`, not our F16 FA changes)
+
+| Test | Baseline (a58222229) | FA Update (42ebe4a41) | Delta |
+|---|---|---|---|
+| pp128 | 4,799 t/s | 4,998 t/s | +4.1% |
+| pp512 | 8,731 t/s | 10,445 t/s | **+19.6%** |
+| tg128 | 201 t/s | 207 t/s | +2.9% |
+| tg256 | 203 t/s | 208 t/s | +2.5% |
+
+> **Note:** NVFP4 gains are from upstream improvements between commits, not our FA config changes (NVFP4 uses `fattn-mma-fp4.cuh`, not `fattn-mma-f16.cuh`).
+
+### NVFP4 27B Dense
+
+| Test | Baseline (a58222229) | FA Update (42ebe4a41) | Delta |
+|---|---|---|---|
+| pp512 | 4,154 t/s | 4,652 t/s | **+12.0%** |
+| tg256 | 61 t/s | 63 t/s | +3.3% |
+
+### Q4_K_XL 30B MoE (exercises `fattn-mma-f16.cuh` — our actual changes)
+
+| Test | FA Update (42ebe4a41) |
+|---|---|
+| pp128 | 4,429 t/s |
+| pp512 | 11,202 t/s |
+| tg128 | 365 t/s |
+| tg256 | 365 t/s |
+
+> No direct baseline for this model/quant combination. A proper A/B test (same commit, FA config on/off) is needed to isolate the impact of the Blackwell FA config changes on non-NVFP4 models.
 
 ---
 
@@ -124,7 +167,44 @@ context in the same VRAM, or reduce pressure for batched inference.
 
 ## Raw `llama-bench` Output
 
-### 35B MoE NVFP4 — batch-size sweep
+### 35B MoE NVFP4 — FA update (build 42ebe4a41, 2026-07-29)
+
+```
+| model                          |       size |     params | backend    | ngl | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------: | --------------: | -------------------: |
+| qwen35moe 35B.A3B NVFP4        |  22.88 GiB |    35.51 B | CUDA       |  99 |      24 |           pp128 |      4997.51 ± 37.34 |
+| qwen35moe 35B.A3B NVFP4        |  22.88 GiB |    35.51 B | CUDA       |  99 |      24 |           pp512 |     10444.50 ± 84.27 |
+| qwen35moe 35B.A3B NVFP4        |  22.88 GiB |    35.51 B | CUDA       |  99 |      24 |           tg128 |        206.81 ± 1.10 |
+| qwen35moe 35B.A3B NVFP4        |  22.88 GiB |    35.51 B | CUDA       |  99 |      24 |           tg256 |        208.49 ± 0.53 |
+
+build: 42ebe4a41 (550)
+```
+
+### 27B Dense NVFP4 — FA update (build 42ebe4a41, 2026-07-29)
+
+```
+| qwen35 27B NVFP4               |  23.72 GiB |    27.32 B | CUDA       |  99 |      24 |           pp128 |     3354.27 ± 580.65 |
+| qwen35 27B NVFP4               |  23.72 GiB |    27.32 B | CUDA       |  99 |      24 |           pp512 |     4651.88 ± 124.43 |
+| qwen35 27B NVFP4               |  23.72 GiB |    27.32 B | CUDA       |  99 |      24 |           tg128 |         63.05 ± 0.18 |
+| qwen35 27B NVFP4               |  23.72 GiB |    27.32 B | CUDA       |  99 |      24 |           tg256 |         62.85 ± 0.01 |
+
+build: 42ebe4a41 (550)
+```
+
+### Qwen3 Coder 30B Q4_K_XL — FA update (build 42ebe4a41, 2026-07-29)
+
+```
+| qwen3moe 30B.A3B Q4_K - Medium |  16.45 GiB |    30.53 B | CUDA       |  99 |      24 |           pp128 |     4428.86 ± 111.33 |
+| qwen3moe 30B.A3B Q4_K - Medium |  16.45 GiB |    30.53 B | CUDA       |  99 |      24 |           pp512 |     11202.38 ± 60.06 |
+| qwen3moe 30B.A3B Q4_K - Medium |  16.45 GiB |    30.53 B | CUDA       |  99 |      24 |           tg128 |        364.56 ± 2.75 |
+| qwen3moe 30B.A3B Q4_K - Medium |  16.45 GiB |    30.53 B | CUDA       |  99 |      24 |           tg256 |        364.97 ± 0.64 |
+
+build: 42ebe4a41 (550)
+```
+
+---
+
+### 35B MoE NVFP4 — batch-size sweep (baseline a58222229, 2026-07-15)
 
 ```
 | model                       | size    | params | backend | ngl | threads | n_batch | test   | t/s                  |
