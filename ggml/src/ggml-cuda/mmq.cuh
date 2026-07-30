@@ -11,6 +11,7 @@
 #define MMQ_ITER_K_BB         1024
 #define MMQ_ITER_K_BB2        2048
 #define MMQ_ITER_K_BB3        4096
+#define MMQ_ITER_K_BB4        8192
 #define MMQ_NWARPS               8
 
 typedef void (*ggml_cuda_mmq_load_tiles_t)(const char * __restrict__ x, int * x_tile, const int kbx0, const int i_max, const int stride);
