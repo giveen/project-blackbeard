@@ -19,8 +19,13 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
     CASE(GGML_TYPE_NVFP4, 256, 1, 128,   8, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, true);
     CASE(GGML_TYPE_NVFP4, 256, 1, 128,  16, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, true);
     CASE(GGML_TYPE_NVFP4, 256, 1, 128,  32, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, true);
-    CASE(GGML_TYPE_NVFP4, 256, 1, 128,  64, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, true);
-    CASE(GGML_TYPE_NVFP4, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, true);
+    CASE(GGML_TYPE_NVFP4, 256, 1, 128,  64, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, true);    CASE(GGML_TYPE_NVFP4, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, true);
+
+    // NVFP4 at 1024: threads_per_row = 1024/64 = 16, fits WARP_SIZE=32.
+    // Must come BEFORE 512 fallback=false entries.
+    CASE(GGML_TYPE_NVFP4, 256, 1, 128,   64, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_BB, true, false);
+    CASE(GGML_TYPE_NVFP4, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_BB, true, false);
+
     CASE(GGML_TYPE_NVFP4, 256, 1, 128,   8, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
     CASE(GGML_TYPE_NVFP4, 256, 1, 128,  16, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
     CASE(GGML_TYPE_NVFP4, 256, 1, 128,  24, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
@@ -32,6 +37,10 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
     CASE(GGML_TYPE_NVFP4, 256, 1, 128,  96, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
     CASE(GGML_TYPE_NVFP4, 256, 1, 128, 112, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
     CASE(GGML_TYPE_NVFP4, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
+
+    // Q4_K at 2048: push K_vram to find register-spilling ceiling
+    CASE(GGML_TYPE_Q4_K, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB2, true, false);
+    CASE(GGML_TYPE_Q5_K, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB2, true, false);
 
     // iter_k=1024 for Q4_K/Q5_K at wide J. Must come BEFORE 512 entries.
     CASE(GGML_TYPE_Q4_K, 256, 1, 128,   64, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB, true, false);
