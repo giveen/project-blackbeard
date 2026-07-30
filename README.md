@@ -100,6 +100,35 @@ llama-cli -hf org/model-id-GGUF
 
 ---
 
+## Known Issues
+
+### MoE Model Quality Degradation at High GPU Offload
+
+**Status:** Under investigation  
+**Affected:** MoE (Mixture of Experts) models at `-ngl >= 15`  
+**Not affected:** Dense models (all quant types, all GPU layers)
+
+MoE models such as Qwen3-Coder-30B-A3B produce incoherent/gibberish output when many layers are offloaded to GPU. The quality breaks between `-ngl 10` and `-ngl 15` and gets progressively worse with more GPU layers. Dense models (Qwen3-8B, Qwen3.6-27B-UD) work perfectly at `-ngl 99`.
+
+**What we know:**
+- The bug is in the **prefill phase** — the very first generated token is corrupted
+- **All Blackwell-specific matmul optimizations have been ruled out** — disabling all MMVQ/vecdotq changes does not fix it, and even bypassing all optimized matmuls (forcing cublas FP32) produces the same corrupted output
+- The matmul **inputs** (expert routing indices and activation tensors) appear to be corrupted before they reach any matmul kernel
+- The likely suspects are the **top-k expert routing kernel** or the **MoE graph construction** in `ggml_cuda_topk_moe_fusion`
+
+**Workaround:** Use `-ngl 10` or fewer GPU layers for MoE models, or use CPU-only inference (`-ngl 0`).
+
+**Detailed investigation log:** See [`docs/moe-quality-debug.md`](docs/moe-quality-debug.md)
+
+### Q4_0 KV Cache Crash
+
+**Status:** Fixed  
+**Affected:** `--cache-type-k q4_0 --cache-type-v q4_0` on Blackwell
+
+Fixed a `misaligned address` CUDA error in `quantize_mmq_q8_1` and `quantize_mmq_q8_1_scatter` kernels by adding runtime 16-byte alignment checks before `float4` loads.
+
+---
+
 ## Contribution expectations
 
 Submissions for this fork must include:

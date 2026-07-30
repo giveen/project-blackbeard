@@ -435,16 +435,26 @@ static __global__ void quantize_mmq_q8_1(
     const int64_t i02 = i2;
     const int64_t i03 = i3;
 
-    const float4 * x4 = (const float4 *) x;
-
     block_q8_1_mmq * y = (block_q8_1_mmq *) vy;
 
     const int64_t ib0 = blockIdx.z*((int64_t)gridDim.x*gridDim.y*blockDim.x/QK8_1); // first block of channel
     const int64_t ib  = ib0 + (i0 / QK8_1_MMQ)*ne1 + blockIdx.x;                    // block index in channel
     const int64_t iqs = i0 % QK8_1_MMQ;                                             // quant index in block
 
-    // Load 4 floats per thread and calculate max. abs. value between them:
-    const float4 xi = i0 < ne00 ? x4[(i03*s03 + i02*s02 + i01*s01 + i00)/4] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    // Load 4 floats per thread.  Use scalar loads when the source pointer is not
+    // 16-byte aligned (float4 requires natural alignment on SM120+).
+    float4 xi;
+    const size_t base_off = (size_t)(i03*s03 + i02*s02 + i01*s01 + i00);
+    if (i0 < ne00) {
+        const float * x_src = x + base_off;
+        if ((uintptr_t)x_src % 16 == 0) {
+            xi = ((const float4 *)x_src)[0];
+        } else {
+            xi.x = x_src[0]; xi.y = x_src[1]; xi.z = x_src[2]; xi.w = x_src[3];
+        }
+    } else {
+        xi = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
     float amax = fabsf(xi.x);
     amax = fmaxf(amax, fabsf(xi.y));
     amax = fmaxf(amax, fabsf(xi.z));
@@ -798,13 +808,25 @@ static __global__ void quantize_mmq_q8_1_scatter(
 
     const int64_t base_idx = (int64_t) blockIdx.x * s02; // one physical row per token
 
-    const float4 * x4 = (const float4 *) x;
     block_q8_1_mmq * y = (block_q8_1_mmq *) vy;
 
     const int64_t k_block = i0 / QK8_1_MMQ;
     const int64_t iqs     = i0 % QK8_1_MMQ;
 
-    const float4 xi = i0 < ne00 ? x4[(base_idx + i00)/4] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    // Scalar or aligned float4 load — float4 requires 16-byte alignment
+    // which may not hold for MoE scatter paths where stride_token varies.
+    float4 xi;
+    const size_t src_off = (size_t)(base_idx + i00);
+    if (i0 < ne00) {
+        const float * x_src = x + src_off;
+        if ((uintptr_t)x_src % 16 == 0) {
+            xi = ((const float4 *)x_src)[0];
+        } else {
+            xi.x = x_src[0]; xi.y = x_src[1]; xi.z = x_src[2]; xi.w = x_src[3];
+        }
+    } else {
+        xi = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
     float amax = fabsf(xi.x);
     amax = fmaxf(amax, fabsf(xi.y));
     amax = fmaxf(amax, fabsf(xi.z));
