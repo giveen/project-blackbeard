@@ -160,10 +160,11 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q4_0(
 
         const int ib    = k_KQ /  QI8_1;
         const int iqs4  = k_KQ %  QI4_0;
-        const int shift = k_KQ & (QI8_1/2);
 
-        int v;
-        __builtin_memcpy(&v, K_q4_0[ib].qs + sizeof(int)*iqs4, sizeof(int));
+        // Load entire block (4 ints) in one 128-bit transaction, extract needed int
+        int4 v4;
+        ggml_cuda_memcpy_1<sizeof(int4)>(&v4, K_q4_0[ib].qs);
+        const int v = ((const int *)&v4)[iqs4];
         const int u = Q_q8[k_KQ_0/nthreads];
 
         const int sumi = ggml_cuda_dp4a(v, u, 0);
@@ -192,8 +193,10 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q4_1(
         const int iqs4  = k_KQ %  QI4_1;
         const int shift = k_KQ & (QI8_1/2);
 
-        int v;
-        ggml_cuda_memcpy_1<sizeof(int)>(&v, K_q4_1[ib].qs + sizeof(int)*iqs4);
+        // Load entire block (4 ints) in one 128-bit transaction, extract needed int
+        int4 v4;
+        ggml_cuda_memcpy_1<sizeof(int4)>(&v4, K_q4_1[ib].qs);
+        int v = ((const int *)&v4)[iqs4];
         v = (v >> shift) & 0x0F0F0F0F;
         const int u = Q_q8[k_KQ_0/nthreads];
 
