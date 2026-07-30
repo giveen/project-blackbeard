@@ -186,6 +186,27 @@ Changed rms_norm block-size threshold from 1024→4096 on Blackwell to use
 tg128 372→351 t/s (-5.6%). Runtime device check overhead or unexpected SM
 occupancy interaction. Reverted.
 
+### 8. Failed: rows_per_block Tuning (rpb=4: -1.4%, rpb=1: -6.2%)
+rows_per_block=4: fewer blocks, more reg pressure, less parallelism.
+rows_per_block=1: more blocks but half the work/block, lower write efficiency.
+Optimal: rows_per_block=2 (current) — balanced work vs parallelism.
+
+### 9. Failed: PDL Disable (-9.7%)
+Setting GGML_CUDA_PDL=0 disables Programmatic Dependent Launch on Blackwell.
+Result: tg128 372→336 t/s (-9.7%). PDL's hardware dependency tracking is
+critical for decode's many small kernel launches.
+
+### 10. Failed: Fused quantize_q8_1 + MMVQ (Dead End)
+With nwarps=1 (32 threads/block), inline fp32→q8_1 quantization takes 2.8µs
+vs standalone kernel's 1.5µs (which uses 2048 threads in parallel). The inline
+step loses the 64-warp parallelism of the standalone kernel, making the fusion
+break-even at best. Only viable with nwarps≥4, but nwarps=4 is neutral for Q4_K.
+
+### 11. Optimal Blackwell Decode Configuration (Q4_K)
+After exhaustive tuning, the optimal decode configuration is:
+- nwarps=1, rows_per_block=2, __ldg on q8_1 reads
+- tg128: 372 t/s (+1.9% vs 365 baseline)
+
 ### 5. nwarps × VDR × warp_size / qi Must Be ≥ 1
 The formula `blocks_per_iter = vdr * nwarps * warp_size / qi` must produce ≥ 1 for
 the MMVQ kernel loop to function. With nwarps=2 and VDR=2 (most quant types):
