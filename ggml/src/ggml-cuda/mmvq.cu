@@ -429,14 +429,14 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
     }
     if (table_id == MMVQ_PARAMETERS_BLACKWELL) {
         // SM120: 256 KB register file, 128 KB shared memory.
-        // nwarps=1 for NVFP4 at ncols_dst=1 (decode): VDR=8,
-        // qi=8, blocks_per_iter=8*1*32/8=32 >= 1. Zero shared-mem
-        // reduction overhead (single warp).
+        // nwarps=1 for NVFP4/Q4_K at ncols_dst=1 (decode): both have
+        // VDR*32/qi >= 16, single-warp safe. Zero shared-mem reduction
+        // overhead compared to nwarps=4.
         // nwarps=4 for other types at ncols_dst=1 (safe, neutral).
         // nwarps=8 for ncols_dst 2-4 (batch prefill), nwarps=4 for 5-8.
         if (ncols_dst == 1) {
-            if (type == GGML_TYPE_NVFP4) {
-                return 1;  // VDR=8 safe, zero reduction overhead
+            if (type == GGML_TYPE_NVFP4 || type == GGML_TYPE_Q4_K) {
+                return 1;  // VDR>=4 safe, zero reduction overhead
             }
             return 4;  // safe for all types, neutral decode
         }
