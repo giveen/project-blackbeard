@@ -38,9 +38,19 @@ static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_conf
     CASE(GGML_TYPE_NVFP4, 256, 1, 128, 112, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
     CASE(GGML_TYPE_NVFP4, 256, 1, 128, 128, GGML_CUDA_MMQ_SRAM_LAYOUT_FP4, MMQ_ITER_K_FP4, true, false);
 
-    // Q4_K at 2048: push K_vram to find register-spilling ceiling
-    CASE(GGML_TYPE_Q4_K, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB2, true, false);
-    CASE(GGML_TYPE_Q5_K, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB2, true, false);
+    // iter_k=4096 trial: Q4_K/Q5_K at J=128 to find register-spilling ceiling
+    CASE(GGML_TYPE_Q4_K, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB3, true, false);
+    CASE(GGML_TYPE_Q5_K, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB3, true, false);
+
+    // iter_k=2048: Q4_K/Q5_K at J=64 (J=128 handled by 4096 above)
+    CASE(GGML_TYPE_Q4_K, 256, 1, 128,   64, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB2, true, false);
+    CASE(GGML_TYPE_Q5_K, 256, 1, 128,   64, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB2, true, false);
+
+    // Extend 2048 to Q6_K, IQ4_NL, Q4_0, Q8_0
+    CASE(GGML_TYPE_Q6_K, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q6_K, MMQ_ITER_K_BB2, true, false);
+    CASE(GGML_TYPE_IQ4_NL, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K_BB2, true, false);
+    CASE(GGML_TYPE_Q4_0, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K_BB2, true, false);
+    CASE(GGML_TYPE_Q8_0, 256, 1, 128,  128, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0, MMQ_ITER_K_BB2, true, false);
 
     // iter_k=1024 for Q4_K/Q5_K at wide J. Must come BEFORE 512 entries.
     CASE(GGML_TYPE_Q4_K, 256, 1, 128,   64, GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1, MMQ_ITER_K_BB, true, false);
