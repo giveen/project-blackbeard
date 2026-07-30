@@ -88,9 +88,17 @@ static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_co
 }
 
 // SM120 (consumer Blackwell) MMA config.
-// Initially aliased to Ampere values. Modify entries here to tune for SM120's
-// 99 KB SMEM, different register/occupancy tradeoffs, or Blackwell-specific behaviour.
+// Tuned for SM120's larger register file, enabling more threads per block
+// without spilling. Key differences from Ampere:
+//   - D=256: nthreads=128 (vs 64), occupancy=2 — more warp parallelism
+//   - D=512/576: kept at Ampere nthreads (64) — nbatch_fa=32 requires
+//     nwarps <= 2 for np*16 <= nbatch_fa constraint
 static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_config_blackwell(const int DKQ, const int DV, const int ncols) {
+    // D=256: wider thread count for better warp parallelism
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256,  8, 128, 2,  64, 128, 128, 128, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256, 16, 128, 2,  64, 128, 128, 128, 2, true);
+
+    // Fall through to Ampere for remaining configs
     return ggml_cuda_fattn_mma_get_config_ampere(DKQ, DV, ncols);
 }
 
@@ -383,7 +391,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
     if constexpr (use_cp_async) {
         static_assert(warp_size == 32, "bad warp_size");
         static_assert(!oob_check, "OOB check not compatible with cp_async");
-        constexpr int preload = 64;
+        constexpr int preload = 128; // 128 B prefetch for SM120 HBM controller
 
         const unsigned int tile_KV_32 = ggml_cuda_cvta_generic_to_shared(tile_KV);
 
@@ -467,7 +475,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_mask(
     if constexpr (use_cp_async) {
         static_assert(nbatch_fa <= 8*warp_size && nbatch_fa % 8 == 0, "bad nbatch_fa");
         static_assert(!oob_check, "OOB check incompatible with cp_async");
-        constexpr int preload = nbatch_fa >= 32 ? nbatch_fa * sizeof(half) : 64;
+        constexpr int preload = nbatch_fa >= 32 ? (nbatch_fa * int(sizeof(half)) > 256 ? 256 : nbatch_fa * int(sizeof(half))) : 64;
         constexpr int cols_per_warp = 8*warp_size/nbatch_fa;
         constexpr int stride_j = nwarps * cols_per_warp;
 
