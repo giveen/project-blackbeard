@@ -692,13 +692,16 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_blackwell(
 #pragma unroll
     for (int i = 0; i < QR4_K; ++i) {
         const block_q8_1 * bq8i = bq8_1 + bq8_offset + i;
-        d8[i] = __low2float(bq8i->ds);
+        // __ldg routes through read-only cache, bypassing L1 — q8_1 is
+        // single-use per token, so keeping it out of L1 preserves L1 for
+        // reusable weight data (Q4_K blocks accessed via bq4_K).
+        d8[i] = __low2float(__ldg(&bq8i->ds));
 
         const int * q8 = (const int *)bq8i->qs + ((iqs/2)%4);
-        u[4*i+0] = q8[0];
-        u[4*i+1] = q8[4];
-        u[4*i+2] = q8[0];  // same q8_1 values, different v[] nibbles
-        u[4*i+3] = q8[4];
+        u[4*i+0] = __ldg(q8 + 0);
+        u[4*i+1] = __ldg(q8 + 4);
+        u[4*i+2] = __ldg(q8 + 0);  // same q8_1 values, different v[] nibbles
+        u[4*i+3] = __ldg(q8 + 4);
     }
 
     const half2 dm4 = bq4_K->dm;
