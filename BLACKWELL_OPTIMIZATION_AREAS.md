@@ -4,10 +4,143 @@
 **Repository**: `/mnt/storage/blackbeard` (llama.cpp fork)
 **Branch `main`**: Current production branch with NVFP4, FA TILE/VEC/MMA dispatch
 **Branch `tq`**: TurboQuant KV cache branch (TBQ3, TURBO3 types)
+**Last updated**: 2026-07-29
 
 ---
 
-## 1. Flash Attention Kernel Architecture
+## ⭐ COMPLETED: Session 2026-07-29
+
+### Current Benchmarks (Q4_K_XL 30B MoE, RTX 5090)
+
+| Test | Original (Ampere baseline) | After All Changes | Delta |
+|---|---|---|---|
+| pp128 | 4,429 t/s | 10,084 t/s | **+127%** |
+| pp512 | 11,176 t/s | 21,133 t/s | **+88%** |
+| tg128 | 365 t/s | 367 t/s | ~0% (decode) |
+| tg256 | 365 t/s | 367 t/s | ~0% (decode) |
+
+### Commit History (newest first)
+
+```
+e360d7aa4 cuda : iter_k=1024 for Q4_K/Q5_K, expand quant coverage, context-length FA dispatch
+b688cc716 cuda : extend Blackwell MMQ iter_k=512 to Q6_K, IQ4_NL, IQ4_XS, IQ3_XXS, Q2_K, Q3_K
+057c64605 docs : add MMQ iter_k=512 Q4_K benchmark results (+59% pp512)
+775d1e6fd cuda : extend Blackwell MMQ config to Q4_K and Q5_K with iter_k=512
+726e845a7 cuda : use int4 loads for VEC KQ inner loops (Q4_0, Q4_1)
+dafc9c362 docs : update FP4 benchmark with Blackwell FA config tuning results
+42ebe4a41 cuda : tune Blackwell MMA F16 FA config and cp.async preload for SM120
+```
+
+### Files Modified This Session
+
+| File | What Changed | Impact |
+|---|---|---|
+| `mmq-config-blackwell.cuh` | 19 quant types now Blackwell-tuned (was 2: NVFP4/MXFP4). iter_k=512 for most, iter_k=1024 for Q4_K/Q5_K at wide J. | **+88% prefill** |
+| `fattn-common.cuh` | VEC int4 loads for q4_0/q4_1 KQ dot products (commit 726e845a7) | Bandwidth-neutral (correctness improvement) |
+| `fattn-mma-f16.cuh` | Blackwell FA config (D=256 nthreads=128), cp.async preload 128, mask clamp | Within noise (FA config affects MMA F16 path) |
+| `fattn.cu` | Blackwell context-length FA dispatch: long ctx (>=65536) decode→VEC, short ctx (<4096) prefill→MMA_F16 | Forward-looking (activates at extremes) |
+| `fp4-benchmark.md` | Updated with all benchmark results | Documentation |
+
+### Key Technical Learnings
+
+1. **K_vram is independent of tile-load functions**: The `MMQ_ITER_K` macro (always 256) is used by `mmq-load-tiles.cuh` for tile-load inner loops. `K_vram` in the CASE macro only affects the outer kernel loop stride. This means we can push `K_vram` much higher (512, 1024, even 2048?) without tile-load correctness issues. The ceiling is register pressure in the outer kernel loop.
+
+2. **iter_k=1024 works on Blackwell**: SM120's larger register file handles 4x K_vram without spilling. At J=64 or J=128 (fallback=false), the 1024 entries are selected because they match before the 512 entries. Narrower J values fall through to 512 entries.
+
+3. **CASE macro matches first (type, J, fallback)**: Entry order matters. Put higher-K_vram entries BEFORE lower ones for the same (type, J, fallback). Otherwise they're dead code.
+
+4. **MoE slow path is rarely hit**: For typical prefill/decode, MMQ and MMVQ fast paths handle everything. The `cudaStreamSynchronize` in `ggml_cuda_mul_mat_id` only matters for edge-case batch sizes that don't match MMQ/MMF criteria.
+
+5. **Decode uses MMVQ, not MMQ**: All our MMQ iter_k changes only affect prefill. Decode throughput is gated by the MMVQ path. To improve decode, target `mmvq.cu`.
+
+---
+
+## 📋 NEXT STEPS — Prioritized by Impact/Effort
+
+### Tier 1: Quick Wins (hours)
+
+#### 1a. Expand iter_k=1024 to Q6_K, IQ4_NL, Q4_0, Q8_0
+**File**: `mmq-config-blackwell.cuh`
+**What**: Add 1024 entries (before 512 entries) for J=64,128 on remaining quant types that use tile-load-safe SRAM layouts.
+**Expected**: +10-30% additional prefill (see Q4_K went from 17,758→21,133 with 1024)
+**Gotcha**: Must be placed BEFORE the 512 entries for the same (type, J, fallback). Only J=64,128 fallback=false (the J selection loop picks these first for prefill).
+**Effort**: 10 minutes. 4 lines per type × 6 types = ~24 lines.
+
+#### 1b. Define MMQ_ITER_K_BB = 1024
+**File**: `mmq.cuh` (line 10, next to `MMQ_ITER_K_FP4`)
+**What**: Replace magic number `1024` with named constant.
+**Effort**: 1 line.
+
+#### 1c. Prefill matrix benchmarks
+**Command**: `llama-bench -p 256,1024,2048,4096 -n 128`
+**What**: See where iter_k=1024 plateaus. Does pp2048 benefit as much as pp512?
+**Effort**: 10 minutes of benchmarking.
+
+### Tier 2: Medium Effort, High Impact
+
+#### 2a. VEC KQ inner loop: 128-bit loads for q5_0, q5_1, q8_0
+**File**: `fattn-common.cuh` — `vec_dot_fattn_vec_KQ_q5_0`, `_q5_1`, `_q8_0`
+**What**: We did q4_0/q4_1 in commit 726e845a7. Finish the remaining quant types. Same pattern: load entire block as int4, extract needed int.
+**Expected**: Small decode improvement for quantized KV. These are bandwidth-bound so gains may be marginal.
+**Gotcha**: Q5_0/Q5_1 have different block structures than Q4 types. Q8_0 is simpler (byte-aligned).
+**Effort**: 30 minutes.
+
+#### 2b. SMEM/L1 Carveout for MMVQ kernel
+**File**: `mmvq.cu` — right before kernel launch in `ggml_cuda_mul_mat_vec_q`
+**What**: Add `cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 0)` to favor L1 for the tiny-SMEM MMVQ kernels (decode path).
+**Expected**: 1-5% decode improvement (L1 cache hit rate improvement for K/V loads).
+**Gotcha**: Must be guarded by `cc >= GGML_CUDA_CC_BLACKWELL`. Only applies to kernels with small SMEM footprints.
+**Effort**: 5 minutes, 2 lines.
+
+### Tier 3: Major Projects (days)
+
+#### 3a. TURBO KQ inner loop optimization (tq branch)
+**Branch**: `tq`
+**File**: `fattn-turbo.cuh`
+**What**: Replace byte-at-a-time loads with 128-bit vectorized loads. Current TURBO decode is 73 t/s vs TBQ3's 135 t/s. This is the single highest decode payoff.
+**Expected**: TURBO decode approaching TBQ3 speeds (73→120+ t/s).
+**Gotcha**: Must work on the `tq` branch. Requires understanding the TURBO3 block layout and PolarQuant dequant.
+**Effort**: 2-4 hours.
+
+#### 3b. NVFP4 iter_k investigation
+**File**: `mmq-config-blackwell.cuh`
+**What**: NVFP4 uses `MMQ_ITER_K_FP4=512` via FP4 SRAM layout. Can we try 1024? The FP4 SRAM layout is different from standard types — the tile-load functions for NVFP4/MXFP4 use `iter_k / QK_NVFP4` which might have different constraints at 1024.
+**Expected**: Unknown. Could be another +10-30% for NVFP4 prefill.
+**Gotcha**: The NVFP4 tile-load function at `mmq-load-tiles.cuh:1743` uses `threads_per_row = iter_k / QK_NVFP4`. At iter_k=1024 with QK_NVFP4=16, that's 64 threads per row — might work, might break.
+**Effort**: 1 hour (try it, if it compiles and benchmarks, keep it).
+
+#### 3c. Blackwell MMA F16 FA config expansion
+**File**: `fattn-mma-f16.cuh`
+**What**: We have a partial Blackwell FA config (D=256 nthreads=128). Expand to D=128, D=512 where feasible. The template hazard (nbatch_fa & stride constraints) is the main blocker.
+**Expected**: 5-10% prefill for non-FP4 attention-heavy models.
+**Gotcha**: Every new (DKQ, DV, ncols1, ncols2) tuple compiles a new template instance. Validate against `static_assert` failures before committing.
+**Effort**: 2-4 hours with benchmark sweeps.
+
+### Tier 4: Long-Term / Blue Sky
+
+- **Hadamard KV cache** (ikawrakow): Quality improvement for aggressive KV quants
+- **FP8 KV cache**: VRAM efficiency, not speed
+- **V-transpose**: Coalesced V loads for TILE/VEC kernels (medium-high difficulty)
+- **Warp specialization FA**: Low ROI without TMA on SM120
+- **Fused full MoE dispatch**: High difficulty, partial existing infrastructure
+
+---
+
+## 🧠 Lessons Learned (for Future Buffy)
+
+1. **Always benchmark with the SAME model**: Qwen3-Coder-30B-A3B Q4_K_XL is our go-to. NVFP4 model path keeps failing (need to fix). Dense 27B model also useful for non-MoE validation.
+
+2. **CASE macro pitfalls**: (a) Entry order matters — first match wins. (b) K_vram must be divisible by 256 (static_assert). (c) I, J, nthreads have their own constraints.
+
+3. **What NOT to chase**: SMEM budget panic (all configs fit 99 KB), warp specialization (no TMA), CUTLASS integration (wrong philosophy), MoE slow path (rarely hit).
+
+4. **The real bottleneck for decode is MMVQ**: All our prefill wins leave decode unchanged. The `mmvq.cu` path needs love — SMEM carveout, VDR tuning, maybe 128-bit loads.
+
+5. **iter_k scaling pattern**: 256 (Ampere) → 512 (+59%) → 1024 (+21% more). Diminishing returns but still positive. The ceiling might be 2048? Worth testing.
+
+---
+
+## 1. Flash Attention Kernel Architecture (legacy catalog — see above for current status)
 
 ### Current State
 - FA2-level kernels (warp-level tiling, `mma.sync.aligned.m16n8k16`)
