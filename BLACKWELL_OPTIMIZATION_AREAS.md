@@ -162,10 +162,29 @@ The RTX 5090's 1.8 TB/s memory bandwidth saturates the MMVQ compute pipeline at
 ~368 t/s for a 30B MoE model. Further decode gains require reducing memory traffic
 (e.g., weight-only quantization, speculative decoding) rather than compute tuning.
 
-### 6. MMVQ Is ~74% of Decode Time (Not 3%!)
-Easy to miscalculate: 7 MMVQ calls/layer × 48 layers = 336 calls. At ~6-8 µs each
-(parallel across SMs), MMVQ dominates decode. The remaining ~26% is attention,
-RMS norm, RoPE, element-wise ops, and kernel launch overhead.
+### 6. MMVQ Is ~31% of Decode Kernel Time (nsys Profile)
+Full nsys profile of 4-token decode reveals the kernel time breakdown:
+
+| Kernel | % Time | Notes |
+|---|---:|---|
+| mul_mat_vec_q (all types) | 31% | Q4_K/NVFP4/Q5_K mat-vec, tuned extensively |
+| quantize_q8_1 | 12.5% | Launch-overhead dominated (1.5µs avg) |
+| rms_norm_f32 | 12.2% | Launch-overhead dominated (3.0µs at 1024-thread) |
+| flash_attn + combine | 6.7% | VEC path, cols_per_block=1 for decode |
+| mul_mat_vec_f (float) | 4.8% | Float mat-vec path |
+| topk_moe_cuda | 3.2% | Expert selection |
+| rope_neox | 3.7% | RoPE rotation |
+| k_bin_bcast (add/mul) | 5.4% | Element-wise ops |
+| Other (set_rows, etc.) | ~20% | Miscellaneous |
+
+Key insight: quantize_q8_1 + rms_norm = 25% from kernel launch overhead.
+Fusing these into downstream MMVQ kernels would recover most of that time.
+
+### 7. Failed: rms_norm Blackwell Thread Threshold (-5.6%)
+Changed rms_norm block-size threshold from 1024→4096 on Blackwell to use
+256-thread path (1.3µs) vs 1024-thread (3.0µs) for hidden_dim=2048. Result:
+tg128 372→351 t/s (-5.6%). Runtime device check overhead or unexpected SM
+occupancy interaction. Reverted.
 
 ### 5. nwarps × VDR × warp_size / qi Must Be ≥ 1
 The formula `blocks_per_iter = vdr * nwarps * warp_size / qi` must produce ≥ 1 for
