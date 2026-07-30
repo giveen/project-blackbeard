@@ -1,6 +1,37 @@
 # Blackwell Optimization Areas — Project Blackbeard
 
-> Updated: 2026-07-29 | GPU: RTX 5090 (SM120, 32 GiB VRAM)
+> Updated: 2026-07-30 | GPU: RTX 5090 (SM120, 32 GiB VRAM)
+
+---
+
+## Upstream Comparison: llama.cpp vs Project Blackbeard
+
+Benchmarked 2026-07-30 on identical hardware (RTX 5090, 32 GiB VRAM),
+identical model files, identical `llama-bench` parameters.
+
+### Q4_K_XL — Qwen3-Coder 30B-A3B MoE (16.45 GiB)
+
+| Test | llama.cpp `e9fa0781f` | Blackbeard `92ba0ea3d` | Speedup |
+|---|---:|---:|---|
+| **pp128** | 3,955 t/s | **10,887 t/s** | **+175%** :fire: |
+| **pp512** | 9,312 t/s | **21,879 t/s** | **+135%** :fire: |
+| **pp1024** | 9,360 t/s | **21,084 t/s** | **+125%** :fire: |
+| tg128 | 352 t/s | 362 t/s | +3% |
+| tg256 | 350 t/s | 360 t/s | +3% |
+
+**Prefill is 2.25-2.75x faster.** The iter_k scaling (256->4096 on Blackwell)
+is responsible for the majority of these gains. Decode improvements are modest
+(+3%) due to memory-latency-bound MMVQ kernels.
+
+### NVFP4 — Qwen35 27B (23.72 GiB)
+
+| Test | llama.cpp `e9fa0781f` | Blackbeard `92ba0ea3d` | Delta |
+|---|---:|---:|---|
+| tg128 | 62 t/s | 61 t/s | -1% (noise) |
+
+NVFP4 is essentially unchanged. Upstream already supports NVFP4 decode.
+Prefill comparison not possible (23.72 GiB model exceeds 32 GiB VRAM with
+context). Blackbeard's NVFP4 iter_k=512 is conservative for stability.
 
 ---
 
