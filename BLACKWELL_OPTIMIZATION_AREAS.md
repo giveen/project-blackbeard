@@ -29,6 +29,8 @@
 | `d3dcdc85f` | Update benchmarks + rbp findings | Docs |
 | `4fbffc943` | nsys decode profile analysis | Docs |
 | `4cfa16f82` | rpb tuning, PDL, quantize fusion | Docs |
+| `92ba0ea3d` | Final benchmark snapshot | Docs |
+| `b6b784ac9` | __launch_bounds__(32,4) Blackwell | **+2.4%** tg (361→370) |
 
 ### Final Benchmarks (RTX 5090, -ngl 99, -t 24)
 
@@ -36,10 +38,10 @@
 
 | Test | Ampere Baseline | After All Optimizations | Delta |
 |---|---:|---:|---|
-| pp128 | 4,429 t/s | 10,802 t/s | **+144%** |
-| pp512 | 11,176 t/s | 21,610 t/s | **+93%** |
-| tg128 | 365 t/s | 361 t/s | ~-1% (thermal?) |
-| tg256 | 367 t/s | 358 t/s | ~-2% (thermal?) |
+| pp128 | 4,429 t/s | 10,859 t/s | **+145%** |
+| pp512 | 11,176 t/s | 21,538 t/s | **+93%** |
+| tg128 | 365 t/s | **370 t/s** | **+1.4%** |
+| tg256 | 367 t/s | 359 t/s | ~-2% (thermal var) |
 
 **NVFP4 35B MoE (22.88 GiB):**
 
