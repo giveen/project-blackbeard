@@ -24,6 +24,8 @@
 | `e360d7aa4` | iter_k=1024 + 19 types + FA | +88% pp512 |
 | `c08f247b5` | nwarps=1 NVFP4 decode | **+5.2%** tg (207→219 t/s) |
 | `d62e7a96c` | nwarps=1 Q4_K decode | Neutral (~+0.8%) |
+| `3e376d2c7` | __ldg q8_1 reads (Q4_K) | **+1.1%** tg (368→372) |
+| `26ae4d87a` | __ldg q8_1 reads (NVFP4) | Neutral (~218 t/s) |
 
 ### Final Benchmarks (RTX 5090, -ngl 99, -t 24)
 
@@ -33,8 +35,8 @@
 |---|---:|---:|---|
 | pp128 | 4,429 t/s | 10,894 t/s | **+146%** |
 | pp512 | 11,176 t/s | 23,242 t/s | **+108%** |
-| tg128 | 365 t/s | 365 t/s | ~0% |
-| tg256 | 367 t/s | 364 t/s | ~0% |
+| tg128 | 365 t/s | **372 t/s** | **+1.9%** |
+| tg256 | 367 t/s | **372 t/s** | **+1.4%** |
 
 **NVFP4 35B MoE (22.88 GiB):**
 
@@ -191,6 +193,9 @@ nwarps tuning options.
 ## Prioritized Next Steps
 
 ### Tier 1: Quick Wins (10-30 min)
+- [x] nwarps=1 for Q4_K decode (neutral, +0.8%, kept for simplicity)
+- [x] __ldg q8_1 cache bypass for Q4_K decode (**+1.1%**, 368→372 t/s)
+- [x] __ldg q8_1 cache bypass for NVFP4 decode (neutral, kept for consistency)
 - [ ] Try NVFP4 model with `-ngl 90` to see if crash threshold changes
 - [ ] Benchmark Q4_K_XL with `-ngl 90` to measure partial offload perf
 - [ ] Run `llama-perplexity` on NVFP4 model to verify correctness
