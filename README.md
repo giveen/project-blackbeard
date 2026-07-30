@@ -6,7 +6,29 @@
 
 
 
-> A Blackwell-focused performance fork of `llama.cpp`, targeting NVIDIA RTX 50-series / SM100 hardware.
+> A Blackwell-focused performance fork of [llama.cpp](https://github.com/ggml-org/llama.cpp), targeting NVIDIA RTX 50-series / SM100 hardware.
+
+---
+
+## Performance vs Upstream llama.cpp
+
+Benchmarked 2026-07-30 on identical hardware, identical model, identical `llama-bench` parameters.
+
+**Hardware:** RTX 5090 (SM120, 32 GiB VRAM), CUDA 13.x  
+**Model:** Qwen3-Coder 30B-A3B MoE, Q4_K_XL (16.45 GiB), `-ngl 99 -t 24`
+
+| Test | llama.cpp `e9fa078` | Blackbeard `8ba2152` | Speedup |
+|---|---:|---:|---|
+| **pp128** (prompt processing, 128 tokens) | 3,955 t/s | **10,887 t/s** | **+175%** |
+| **pp512** (prompt processing, 512 tokens) | 9,312 t/s | **21,879 t/s** | **+135%** |
+| **pp1024** (prompt processing, 1024 tokens) | 9,360 t/s | **21,084 t/s** | **+125%** |
+| **tg128** (text generation, 128 tokens) | 352 t/s | **362 t/s** | **+3%** |
+| **tg256** (text generation, 256 tokens) | 350 t/s | **360 t/s** | **+3%** |
+
+**Key wins:**
+- **Prefill is 2.25-2.75x faster** via `iter_k` scaling (256 -> 4096) across 19 quant types, exploiting Blackwell's larger shared memory (128 KB) for wider VRAM tile sizes.
+- **Decode +3%** via `__ldg` cache-bypass on single-use q8_1 reads, `__launch_bounds__(32,4)` for improved SM occupancy, and nwarps=1 on Q4_K/NVFP4 to eliminate shared-memory reduction overhead.
+- 22 commits across decode/prefill tuning, all backed by nsys/ncu profiling on real hardware.
 
 This project is built on the excellent foundation of [llama.cpp](https://github.com/ggml-org/llama.cpp), which was created and is maintained by [Georgi Gerganov](https://github.com/ggerganov) and the [ggml-org](https://github.com/ggml-org) community. We respectfully acknowledge that work; Project Blackbeard is a narrow downstream optimization effort focused on one hardware family, not an upstream replacement.
 
