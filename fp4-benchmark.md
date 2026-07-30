@@ -1,7 +1,7 @@
 # Project Blackbeard — Blackwell FP4 Benchmark
 
-> **Date:** 2026-07-15 (original), 2026-07-29 (FA config update), 2026-07-29 (MMQ iter_k update)
-> **Build:** `a58222229` (b10027, original) / `42ebe4a41` (b550, FA update) / `775d1e6fd` (b553, MMQ update)
+> **Date:** 2026-07-15 (original), 2026-07-29 (multiple updates)
+> **Latest Build:** `2d0b18e71` (b559, VEC int4 q5 + iter_k=1024 expanded)
 > **GPU:** RTX 5090 (sm120 Blackwell), CUDA 13.3, 32 GiB VRAM
 > **CPU:** Intel Ultra 9 285K (24 P-cores), gcc-15.2
 
@@ -37,6 +37,16 @@ intensity for prefill matmuls. SMEM-neutral (I=128, J independent of K_vram).
 | tg256 | 365 t/s | 364 t/s | -0.3% (noise) |
 
 Decode is unchanged (MMVQ path, not MMQ — K_vram does not affect decode).
+
+### Prefill Saturation Matrix (build 2d0b18e71)
+
+Q4_K_XL 30B MoE:
+
+| pp128 | pp256 | pp512 | pp1024 | pp2048 | pp4096 |
+|---|---:|---:|---:|---:|---:|
+| 10,120 | 15,161 | 20,962 | **21,098** | 20,510 | 19,094 |
+
+Peak at pp1024 (~21k t/s). Gentle decline beyond 1024 as K/V memory traffic grows.
 
 ---
 
