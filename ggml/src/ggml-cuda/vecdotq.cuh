@@ -620,6 +620,10 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1_impl_mmq(
 #define VDR_Q4_K_Q8_1_MMVQ 2
 #define VDR_Q4_K_Q8_1_MMQ  8
 
+#if defined(BLACKWELL_MMA_AVAILABLE)
+#define VDR_Q4_K_Q8_1_MMVQ_BLACKWELL 4
+#endif
+
 // contiguous v/x values
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
     const int * __restrict__ v, const int * __restrict__ u, const uint8_t * __restrict__ sc,
@@ -644,6 +648,87 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
 
     return dm4f.x*sumf_d - dm4f.y*sumf_m;
 }
+
+#if defined(BLACKWELL_MMA_AVAILABLE)
+// Blackwell-optimized Q4_K decode: VDR=4 processes twice the elements per
+// thread invocation vs baseline VDR=2. Each call handles 4 ints from q4_K
+// (128 elements) and 32 ints from q8_1 (4 per sub-block).
+// Reduces loop iteration count by 2x and amortizes per-call overhead.
+static __device__ __forceinline__ float vec_dot_q4_K_q8_1_blackwell(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_q4_K * bq4_K = (const block_q4_K *) vbq + kbx;
+
+    const int bq8_offset = QR4_K * ((iqs/2) / (QI8_1/2));
+    const int * q4 = (const int *)(bq4_K->qs + 16 * bq8_offset + 4 * ((iqs/2)%4));
+
+    // VDR=4: load 4 ints from q4_K->qs (stride 4 ints = 16 bytes apart)
+    int v[4];
+    v[0] = q4[0];
+    v[1] = q4[4];
+    v[2] = q4[8];
+    v[3] = q4[12];
+
+    int    u[4*QR4_K];
+    float d8[QR4_K];
+
+    // Scale extraction (same as VDR=2)
+    const uint16_t * scales = (const uint16_t *)bq4_K->scales;
+    uint16_t aux[2];
+    const int j = bq8_offset/2;
+    if (j < 2) {
+        aux[0] = scales[j+0] & 0x3f3f;
+        aux[1] = scales[j+2] & 0x3f3f;
+    } else {
+        aux[0] = ((scales[j+2] >> 0) & 0x0f0f) | ((scales[j-2] & 0xc0c0) >> 2);
+        aux[1] = ((scales[j+2] >> 4) & 0x0f0f) | ((scales[j-0] & 0xc0c0) >> 2);
+    }
+    const uint8_t * sc = (const uint8_t *)aux;
+    const uint8_t * m  = sc + 2;
+
+    // VDR=4: each sub-block gets 4 ints from its own q8_1 block.
+    // v[0],v[1] and v[2],v[3] are from the same Q4_K weight block and
+    // share the same q8_1 activation values per sub-block.
+#pragma unroll
+    for (int i = 0; i < QR4_K; ++i) {
+        const block_q8_1 * bq8i = bq8_1 + bq8_offset + i;
+        d8[i] = __low2float(bq8i->ds);
+
+        const int * q8 = (const int *)bq8i->qs + ((iqs/2)%4);
+        u[4*i+0] = q8[0];
+        u[4*i+1] = q8[4];
+        u[4*i+2] = q8[0];  // same q8_1 values, different v[] nibbles
+        u[4*i+3] = q8[4];
+    }
+
+    const half2 dm4 = bq4_K->dm;
+
+    // VDR=4 inner loop: process v[0]..v[3] per sub-block, 4 dp4a per iteration
+    float sumf_d = 0.0f;
+    float sumf_m = 0.0f;
+
+#pragma unroll
+    for (int i = 0; i < QR4_K; ++i) {
+        const int v0i = (v[0] >> (4*i)) & 0x0F0F0F0F;
+        const int v1i = (v[1] >> (4*i)) & 0x0F0F0F0F;
+        const int v2i = (v[2] >> (4*i)) & 0x0F0F0F0F;
+        const int v3i = (v[3] >> (4*i)) & 0x0F0F0F0F;
+
+        int dot1 = ggml_cuda_dp4a(v1i, u[4*i+1], ggml_cuda_dp4a(v0i, u[4*i+0], 0));
+        dot1     = ggml_cuda_dp4a(v3i, u[4*i+3], ggml_cuda_dp4a(v2i, u[4*i+2], dot1));
+
+        int dot2 = ggml_cuda_dp4a(0x01010101, u[4*i+1], ggml_cuda_dp4a(0x01010101, u[4*i+0], 0));
+        dot2     = ggml_cuda_dp4a(0x01010101, u[4*i+3], ggml_cuda_dp4a(0x01010101, u[4*i+2], dot2));
+
+        sumf_d += d8[i] * (dot1 * sc[i]);
+        sumf_m += d8[i] * (dot2 * m[i]);
+    }
+
+    const float2 dm4f = __half22float2(dm4);
+
+    return dm4f.x*sumf_d - dm4f.y*sumf_m;
+}
+#endif // BLACKWELL_MMA_AVAILABLE
 
 // contiguous v/x + u/y values
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_mmq(
