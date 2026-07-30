@@ -544,8 +544,16 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
     return 1;
 }
 
+static constexpr __host__ __device__ int get_min_blocks_per_sm(mmvq_parameter_table_id table_id) {
+    // SM120 (Blackwell): 32-thread blocks with nwarps=1 can easily fit 4+
+    // blocks per SM (256KB register file, 128KB shared memory). Higher
+    // min blocks forces compiler to be more conservative with registers,
+    // improving occupancy for latency-bound decode kernels.
+    return (table_id == MMVQ_PARAMETERS_BLACKWELL) ? 4 : 1;
+}
+
 template <ggml_type type, int ncols_dst, bool has_fusion, bool small_k = false>
-__launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id())*ggml_cuda_get_physical_warp_size(), 1)
+__launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id())*ggml_cuda_get_physical_warp_size(), get_min_blocks_per_sm(get_device_table_id()))
 static __global__ void mul_mat_vec_q(
         const void * vx_ptr, const void * vy_ptr, const int32_t * ids_ptr, const ggml_cuda_mm_fusion_args_device fusion, float * dst_ptr,
         const uint32_t ncols_x, const uint3 nchannels_y, const uint32_t stride_row_x, const uint32_t stride_col_y,
