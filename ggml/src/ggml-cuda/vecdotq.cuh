@@ -402,17 +402,19 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1_blackwell(
 
     // Sub-blocks 0,1 share one q8_1 block:
     //   sub0 uses qs[0..3] (first 16 elements), sub1 uses qs[4..7] (second 16)
+    // __ldg routes q8_1 through read-only cache — single-use per token,
+    // preserving L1 for reusable NVFP4 weight blocks.
     const block_q8_1 * bq8 = bq8_1;
 
-    int sumi0 = ggml_cuda_dp4a(v00.x, get_int_b4(bq8->qs, 0), 0);
-    sumi0 = ggml_cuda_dp4a(v00.y, get_int_b4(bq8->qs, 2), sumi0);
-    sumi0 = ggml_cuda_dp4a(v01.x, get_int_b4(bq8->qs, 1), sumi0);
-    sumi0 = ggml_cuda_dp4a(v01.y, get_int_b4(bq8->qs, 3), sumi0);
+    int sumi0 = ggml_cuda_dp4a(v00.x, __ldg((const int *)bq8->qs + 0), 0);
+    sumi0 = ggml_cuda_dp4a(v00.y, __ldg((const int *)bq8->qs + 2), sumi0);
+    sumi0 = ggml_cuda_dp4a(v01.x, __ldg((const int *)bq8->qs + 1), sumi0);
+    sumi0 = ggml_cuda_dp4a(v01.y, __ldg((const int *)bq8->qs + 3), sumi0);
 
-    int sumi1 = ggml_cuda_dp4a(v10.x, get_int_b4(bq8->qs, 4), 0);
-    sumi1 = ggml_cuda_dp4a(v10.y, get_int_b4(bq8->qs, 6), sumi1);
-    sumi1 = ggml_cuda_dp4a(v11.x, get_int_b4(bq8->qs, 5), sumi1);
-    sumi1 = ggml_cuda_dp4a(v11.y, get_int_b4(bq8->qs, 7), sumi1);
+    int sumi1 = ggml_cuda_dp4a(v10.x, __ldg((const int *)bq8->qs + 4), 0);
+    sumi1 = ggml_cuda_dp4a(v10.y, __ldg((const int *)bq8->qs + 6), sumi1);
+    sumi1 = ggml_cuda_dp4a(v11.x, __ldg((const int *)bq8->qs + 5), sumi1);
+    sumi1 = ggml_cuda_dp4a(v11.y, __ldg((const int *)bq8->qs + 7), sumi1);
 
     // Sub-blocks 2,3: load qs[4..7]
     const int32_t qs20 = qs32[4];
@@ -427,21 +429,21 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1_blackwell(
 
     const block_q8_1 * bq8_2 = bq8_1 + 1;
 
-    int sumi2 = ggml_cuda_dp4a(v20.x, get_int_b4(bq8_2->qs, 0), 0);
-    sumi2 = ggml_cuda_dp4a(v20.y, get_int_b4(bq8_2->qs, 2), sumi2);
-    sumi2 = ggml_cuda_dp4a(v21.x, get_int_b4(bq8_2->qs, 1), sumi2);
-    sumi2 = ggml_cuda_dp4a(v21.y, get_int_b4(bq8_2->qs, 3), sumi2);
+    int sumi2 = ggml_cuda_dp4a(v20.x, __ldg((const int *)bq8_2->qs + 0), 0);
+    sumi2 = ggml_cuda_dp4a(v20.y, __ldg((const int *)bq8_2->qs + 2), sumi2);
+    sumi2 = ggml_cuda_dp4a(v21.x, __ldg((const int *)bq8_2->qs + 1), sumi2);
+    sumi2 = ggml_cuda_dp4a(v21.y, __ldg((const int *)bq8_2->qs + 3), sumi2);
 
-    int sumi3 = ggml_cuda_dp4a(v30.x, get_int_b4(bq8_2->qs, 4), 0);
-    sumi3 = ggml_cuda_dp4a(v30.y, get_int_b4(bq8_2->qs, 6), sumi3);
-    sumi3 = ggml_cuda_dp4a(v31.x, get_int_b4(bq8_2->qs, 5), sumi3);
-    sumi3 = ggml_cuda_dp4a(v31.y, get_int_b4(bq8_2->qs, 7), sumi3);
+    int sumi3 = ggml_cuda_dp4a(v30.x, __ldg((const int *)bq8_2->qs + 4), 0);
+    sumi3 = ggml_cuda_dp4a(v30.y, __ldg((const int *)bq8_2->qs + 6), sumi3);
+    sumi3 = ggml_cuda_dp4a(v31.x, __ldg((const int *)bq8_2->qs + 5), sumi3);
+    sumi3 = ggml_cuda_dp4a(v31.y, __ldg((const int *)bq8_2->qs + 7), sumi3);
 
     float sumf = 0.0f;
-    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[0]) * __low2float(bq8->ds) * float(sumi0);
-    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[1]) * __low2float(bq8->ds) * float(sumi1);
-    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[2]) * __low2float(bq8_2->ds) * float(sumi2);
-    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[3]) * __low2float(bq8_2->ds) * float(sumi3);
+    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[0]) * __low2float(__ldg(&bq8->ds))     * float(sumi0);
+    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[1]) * __low2float(__ldg(&bq8->ds))     * float(sumi1);
+    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[2]) * __low2float(__ldg(&bq8_2->ds))   * float(sumi2);
+    sumf += ggml_cuda_ue4m3_to_fp32(bq->d[3]) * __low2float(__ldg(&bq8_2->ds))   * float(sumi3);
 
     (void)iqs;
     return sumf;
