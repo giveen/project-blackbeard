@@ -76,7 +76,8 @@ enum mmvq_parameter_table_id {
     MMVQ_PARAMETERS_GCN,
     MMVQ_PARAMETERS_RDNA2,
     MMVQ_PARAMETERS_RDNA3_0,
-    MMVQ_PARAMETERS_RDNA4
+    MMVQ_PARAMETERS_RDNA4,
+    MMVQ_PARAMETERS_BLACKWELL
 };
 
 static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
@@ -88,6 +89,8 @@ static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
     return MMVQ_PARAMETERS_RDNA2;
 #elif defined(GCN) || defined(CDNA)
     return MMVQ_PARAMETERS_GCN;
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
+    return MMVQ_PARAMETERS_BLACKWELL;
 #elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_TURING && __CUDA_ARCH__ < GGML_CUDA_CC_AMPERE
     return MMVQ_PARAMETERS_TURING;
 #else
@@ -107,6 +110,9 @@ static __host__ mmvq_parameter_table_id get_device_table_id(int cc) {
     }
     if (GGML_CUDA_CC_IS_GCN(cc) || GGML_CUDA_CC_IS_CDNA(cc)) {
         return MMVQ_PARAMETERS_GCN;
+    }
+    if (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_BLACKWELL) {
+        return MMVQ_PARAMETERS_BLACKWELL;
     }
     if (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_TURING && ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_AMPERE) {
         return MMVQ_PARAMETERS_TURING;
@@ -413,6 +419,28 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
         }
         return 1;
     }
+    if (table_id == MMVQ_PARAMETERS_BLACKWELL) {
+        // SM120: 256 KB register file, 128 KB shared memory.
+        // nwarps>4 at ncols_dst=1 regresses decode (-26%): the extra
+        // warp-reduction overhead dominates any occupancy gain.
+        // nwarps=8 for ncols_dst 2-4 (batch prefill), nwarps=4 for 5-8.
+        if (ncols_dst == 1) {
+            return 4;  // same as GENERIC, decode path
+        }
+        switch (ncols_dst) {
+            case 2:
+            case 3:
+            case 4:
+                return 8;
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+                return 4;
+            default:
+                return 1;
+        }
+    }
     if (table_id == MMVQ_PARAMETERS_RDNA3_0) {
         // RDNA3 (W7900): stricter whitelist than RDNA4.
         // Q2_K / Q5_K / IQ4_XS regress in full quant sweeps.
@@ -469,6 +497,25 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
         switch (ncols_dst) {
             case 1:
                 return small_k ? nwarps : 1;
+            case 2:
+            case 3:
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+                return 2;
+            default:
+                return 1;
+        }
+    }
+    if (table_id == MMVQ_PARAMETERS_BLACKWELL) {
+        // Blackwell: rows_per_block=2 for decode to improve SM occupancy
+        // (2 rows per block with nwarps=4 doubles work vs GENERIC's 1 row).
+        // For ncols_dst>=2: rows_per_block=2 to match nwarps scaling.
+        switch (ncols_dst) {
+            case 1:
+                return small_k ? nwarps : 2;  // 2 rows/block at decode
             case 2:
             case 3:
             case 4:
