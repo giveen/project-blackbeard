@@ -1272,6 +1272,9 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     pimpl->n_bytes = ml.n_bytes;
 
     pimpl->desc_str = arch_name() + " " + type_name() + " " + ml.ftype_name();
+
+    // set rope_type based on architecture (e.g. IMROPE for Qwen3.5)
+    hparams.rope_type = llama_model_rope_type(this);
 }
 
 void llama_model_base::load_vocab(llama_model_loader & ml) {
